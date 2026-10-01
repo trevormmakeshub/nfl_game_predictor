@@ -1,5 +1,5 @@
 bin,count,home_win_rate,calibrated,note
-50-55,0,,,home_win_prob is not a column in nfl_completed.csv
-55-60,0,,,home_win_prob is not a column in nfl_completed.csv
-60-65,0,,,home_win_prob is not a column in nfl_completed.csv
-65-plus,0,,,home_win_prob is not a column in nfl_completed.csv
+50-55,60,0.516667,yes,
+55-60,56,0.642857,yes,
+60-65,38,0.763158,yes,
+65-plus,27,0.962963,yes,

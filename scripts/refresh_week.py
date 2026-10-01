@@ -193,28 +193,63 @@ def weekly_player_ids(display_name: str, team: str | None = None, position: str 
     return found
 
 
-def apply_week4_green_bay_starter(games: list[dict]) -> None:
-    """Use Jordan Love on the Week 4 Green Bay at Tampa Bay row.
+def depth_chart_qb1(team: str) -> tuple[str, str] | None:
+    """Return the single latest-stamp QB1 for one team, or None."""
+    path = DATA / "depth_charts" / "depth_charts_2026.csv"
+    if not path.exists():
+        return None
+    latest = ""
+    rows: list[dict] = []
+    with path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            if (row.get("team") or "").strip() != team:
+                continue
+            if (row.get("pos_abb") or "").strip() != "QB":
+                continue
+            stamp = (row.get("dt") or "").strip()
+            if stamp > latest:
+                latest = stamp
+                rows = [row]
+            elif stamp == latest:
+                rows.append(row)
+    starters = []
+    for row in rows:
+        rank = (row.get("pos_rank") or "").strip()
+        if rank in {"1", "1.0"}:
+            starters.append(row)
+    if len(starters) != 1:
+        return None
+    player_id = (starters[0].get("gsis_id") or "").strip()
+    name = (starters[0].get("player_name") or "").strip()
+    if not player_id or not name:
+        return None
+    return player_id, name
 
-    The saved weekly file has one Jordan Love at Green Bay. If that row
-    still lists Jalon Daniels, his id is replaced with Love's id.
-    No other game is changed.
+
+def apply_week4_green_bay_starter(games: list[dict]) -> None:
+    """Jordan Love is the away quarterback only on 2026_04_GB_TB.
+
+    The home cell is the latest Tampa Bay depth-chart starter.
+    Love is never written into the home cell. No other game is changed.
     """
     love_ids = weekly_player_ids("Jordan Love", "GB", "QB")
-    daniels_ids = weekly_player_ids("Jalon Daniels", None, "QB")
-    if len(love_ids) != 1 or len(daniels_ids) != 1:
-        return
-    love_id = next(iter(love_ids))
-    daniels_id = next(iter(daniels_ids))
+    love_id = next(iter(love_ids)) if len(love_ids) == 1 else None
+    forbidden = {"00-0036264"}
+    if love_id:
+        forbidden.add(love_id)
+    starter = depth_chart_qb1("TB")
     for game in games:
         if game.get("game_id") != "2026_04_GB_TB":
             continue
         if game.get("away") != "GB" or game.get("home") != "TB":
             continue
-        if game.get("away_qb_id") != love_id:
+        if love_id is not None and game.get("away_qb_id") != love_id:
             game["away_qb_id"] = love_id
-        if game.get("home_qb_id") == daniels_id:
-            game["home_qb_id"] = love_id
+        if starter is None or starter[0] in forbidden:
+            game["home_qb_id"] = None
+            print("Tampa Bay starter missing.", flush=True)
+            continue
+        game["home_qb_id"] = starter[0]
 
 
 def load_schedule() -> list[dict]:
@@ -537,7 +572,23 @@ def clear_prediction(row: dict) -> None:
     row["total_lean"] = None
 
 
+def win_probability(row: dict, features: list[str], center, scale, ridge, positive_is_home: bool) -> float | None:
+    """Score one row from prior features. A game's own score is not a feature."""
+    if {"home_score", "away_score", "home_win"}.intersection(features):
+        return None
+    if any(row.get(feature) is None for feature in features):
+        return None
+    sample = (np.array([row[feature] for feature in features], dtype=float) - center) / scale
+    sample = sample.reshape(1, -1)
+    decision = float(ridge.decision_function(sample)[0])
+    if not positive_is_home:
+        decision = -decision
+    return float(expit(decision))
+
+
 def train(completed_rows: list[dict], next_rows: list[dict], features: list[str]) -> tuple[int, list[dict]]:
+    for row in completed_rows:
+        row["home_win_prob"] = None
     trainable = []
     for row in completed_rows:
         if row["home_win"] is None:
@@ -547,6 +598,7 @@ def train(completed_rows: list[dict], next_rows: list[dict], features: list[str]
         trainable.append(row)
     if len(trainable) < 2 or len({row["home_win"] for row in trainable}) < 2:
         print("train_rows", len(trainable), flush=True)
+        print("unscored_completed", len(completed_rows), flush=True)
         for row in next_rows:
             clear_prediction(row)
         return len(trainable), next_rows
@@ -562,23 +614,28 @@ def train(completed_rows: list[dict], next_rows: list[dict], features: list[str]
     home_points = LinearRegression().fit(scaled, frame["home_score"].to_numpy(dtype=float))
     away_points = LinearRegression().fit(scaled, frame["away_score"].to_numpy(dtype=float))
     positive_is_home = int(ridge.classes_[1]) == 1
+    unscored = 0
+    for row in completed_rows:
+        probability = win_probability(row, features, center, scale, ridge, positive_is_home)
+        row["home_win_prob"] = probability
+        if probability is None:
+            unscored += 1
     for row in next_rows:
-        if any(row.get(feature) is None for feature in features):
+        probability = win_probability(row, features, center, scale, ridge, positive_is_home)
+        if probability is None:
             clear_prediction(row)
             continue
         sample = (np.array([row[feature] for feature in features], dtype=float) - center) / scale
         sample = sample.reshape(1, -1)
-        decision = float(ridge.decision_function(sample)[0])
-        if not positive_is_home:
-            decision = -decision
         away = float(away_points.predict(sample)[0])
         home = float(home_points.predict(sample)[0])
-        row["home_win_prob"] = float(expit(decision))
+        row["home_win_prob"] = probability
         row["predicted_away_points"] = away
         row["predicted_home_points"] = home
         row["predicted_points"] = away + home
         mark_lean(row)
     print("train_rows", len(trainable), flush=True)
+    print("unscored_completed", unscored, flush=True)
     return len(trainable), next_rows
 
 
@@ -592,6 +649,52 @@ def write_readme(max_date: str) -> None:
         "Run `python scripts/refresh_week.py` once a week during the season.\n",
         encoding="utf-8",
         newline="\n",
+    )
+
+
+def mariota_starter_row() -> bool:
+    """True only when the 2026 injury file has a starter row for Marcus Mariota."""
+    path = DATA / "injuries" / "injuries_2026.csv"
+    if not path.exists():
+        return False
+    with path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            if (row.get("full_name") or "").strip() != "Marcus Mariota":
+                continue
+            if (row.get("season") or "").strip() != "2026":
+                continue
+            blob = " ".join((row.get(key) or "") for key in row).lower()
+            if "starter" in blob:
+                return True
+    return False
+
+
+def week4_quarterback_note(games: list[dict]) -> str:
+    love_ids = weekly_player_ids("Jordan Love", "GB", "QB")
+    love_id = next(iter(love_ids)) if len(love_ids) == 1 else "00-0036264"
+    starter = depth_chart_qb1("TB")
+    gb = next((game for game in games if game.get("game_id") == "2026_04_GB_TB"), None)
+    home_id = None if gb is None else gb.get("home_qb_id")
+    if starter is not None and home_id == starter[0] and home_id != love_id:
+        home_sentence = (
+            f"The home quarterback is the Tampa Bay starter on the latest 2026 depth chart, "
+            f"{starter[1]} ({starter[0]})."
+        )
+    else:
+        home_sentence = "Tampa Bay starter missing."
+    if mariota_starter_row():
+        washington = "Washington, game 2026_04_IND_WAS, has a Marcus Mariota starter row in the 2026 injury file."
+    else:
+        washington = (
+            "Washington, game 2026_04_IND_WAS, stays as saved. "
+            "The 2026 injury file has no starter row for Marcus Mariota."
+        )
+    return (
+        f"Week 4 Green Bay at Tampa Bay, game 2026_04_GB_TB, lists Jordan Love ({love_id}) as the away quarterback only. "
+        f"{home_sentence} "
+        "Jordan Love is not the home quarterback. "
+        "Week 5 Tampa Bay at Dallas was left as saved. "
+        f"{washington}"
     )
 
 
@@ -759,9 +862,14 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
             next_rows.append({**game, **feature_row})
 
     train_rows, next_rows = train(completed_rows, next_rows, features)
+    unscored = sum(1 for row in completed_rows if row.get("home_win_prob") is None)
     id_columns = ["game_id", "date", "season", "week", "game_type", "away", "home", "away_score", "home_score", "home_win"]
     carried = [name for name in schedule_columns if name not in features]
-    write_csv(ARTIFACTS / "nfl_completed.csv", completed_rows, id_columns + carried + features)
+    write_csv(
+        ARTIFACTS / "nfl_completed.csv",
+        completed_rows,
+        id_columns + carried + features + ["home_win_prob"],
+    )
     next_columns = [
         "game_id",
         "date",
@@ -796,16 +904,11 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
             "",
             "The line is the recorded schedule line, not a live book price, and this does not price a bet. A lean is not a wager.",
             "",
-            (
-                "Week 4 Green Bay at Tampa Bay, game 2026_04_GB_TB, uses Jordan Love from the saved weekly player file "
-                f"({next(iter(weekly_player_ids('Jordan Love', 'GB', 'QB')))}). "
-                "The schedule file had listed Jalon Daniels in the home quarterback cell on that row, and that cell was replaced with Jordan Love. "
-                "Week 5 Tampa Bay at Dallas was left as saved. "
-                "Washington at London, game 2026_04_IND_WAS, keeps Jayden Daniels. "
-                "The 2026 injury file lists him as limited with an elbow in week 4 and has no Marcus Mariota starter row. "
-                "The saved ESPN scoreboard names Mariota as a passing leader, with no starter designation and no active designation for Jayden Daniels. "
-                "Jayden Daniels and Marcus Mariota stay on Washington."
-            ),
+            week4_quarterback_note(games),
+            "",
+            "Calibration is a check, not a bet.",
+            "",
+            f"Rows that could not be scored: {unscored}",
             "",
             "spread_line, total_line, home_moneyline, and div_game are model features when the schedule file has those columns. roof, surface, temp, wind, away_qb_id, and home_qb_id are carried from that file. temp and wind are blank on the current week, so they are not filled and are not model features.",
             "",
