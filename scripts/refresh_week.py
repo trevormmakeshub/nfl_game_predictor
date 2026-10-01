@@ -173,6 +173,50 @@ def read_csv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, low_memory=False)
 
 
+def weekly_player_ids(display_name: str, team: str | None = None, position: str | None = None) -> set[str]:
+    found: set[str] = set()
+    for season in (2025, 2026):
+        path = DATA / "stats_player" / f"stats_player_week_{season}.csv"
+        if not path.exists():
+            continue
+        with path.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                if (row.get("player_display_name") or "").strip() != display_name:
+                    continue
+                if team is not None and (row.get("team") or "").strip() != team:
+                    continue
+                if position is not None and (row.get("position") or "").strip() != position:
+                    continue
+                player_id = (row.get("player_id") or "").strip()
+                if player_id:
+                    found.add(player_id)
+    return found
+
+
+def apply_week4_green_bay_starter(games: list[dict]) -> None:
+    """Use Jordan Love on the Week 4 Green Bay at Tampa Bay row.
+
+    The saved weekly file has one Jordan Love at Green Bay. If that row
+    still lists Jalon Daniels, his id is replaced with Love's id.
+    No other game is changed.
+    """
+    love_ids = weekly_player_ids("Jordan Love", "GB", "QB")
+    daniels_ids = weekly_player_ids("Jalon Daniels", None, "QB")
+    if len(love_ids) != 1 or len(daniels_ids) != 1:
+        return
+    love_id = next(iter(love_ids))
+    daniels_id = next(iter(daniels_ids))
+    for game in games:
+        if game.get("game_id") != "2026_04_GB_TB":
+            continue
+        if game.get("away") != "GB" or game.get("home") != "TB":
+            continue
+        if game.get("away_qb_id") != love_id:
+            game["away_qb_id"] = love_id
+        if game.get("home_qb_id") == daniels_id:
+            game["home_qb_id"] = love_id
+
+
 def load_schedule() -> list[dict]:
     frame = read_csv(DATA / "schedules" / "games.csv")
     present = [name for name in SCHEDULE_FIELDS if name in frame.columns]
@@ -210,6 +254,7 @@ def load_schedule() -> list[dict]:
                 game[name] = as_float(raw_value)
         games.append(game)
     games.sort(key=lambda game: (game["date"], game["season"], game["week"], game["game_id"]))
+    apply_week4_green_bay_starter(games)
     return games
 
 
@@ -750,6 +795,17 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
             "The training rows use only earlier games: win rate, points per game, rest days, prior-week injury and snap counts, and the starting quarterback's prior-games passer rating and interception rate. A game does not train on its own score or its own quarterback line. The win model is a ridge classifier. Points use linear regression.",
             "",
             "The line is the recorded schedule line, not a live book price, and this does not price a bet. A lean is not a wager.",
+            "",
+            (
+                "Week 4 Green Bay at Tampa Bay, game 2026_04_GB_TB, uses Jordan Love from the saved weekly player file "
+                f"({next(iter(weekly_player_ids('Jordan Love', 'GB', 'QB')))}). "
+                "The schedule file had listed Jalon Daniels in the home quarterback cell on that row, and that cell was replaced with Jordan Love. "
+                "Week 5 Tampa Bay at Dallas was left as saved. "
+                "Washington at London, game 2026_04_IND_WAS, keeps Jayden Daniels. "
+                "The 2026 injury file lists him as limited with an elbow in week 4 and has no Marcus Mariota starter row. "
+                "The saved ESPN scoreboard names Mariota as a passing leader, with no starter designation and no active designation for Jayden Daniels. "
+                "Jayden Daniels and Marcus Mariota stay on Washington."
+            ),
             "",
             "spread_line, total_line, home_moneyline, and div_game are model features when the schedule file has those columns. roof, surface, temp, wind, away_qb_id, and home_qb_id are carried from that file. temp and wind are blank on the current week, so they are not filled and are not model features.",
             "",

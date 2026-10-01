@@ -6,6 +6,8 @@ The training rows use only earlier games: win rate, points per game, rest days, 
 
 The line is the recorded schedule line, not a live book price, and this does not price a bet. A lean is not a wager.
 
+Week 4 Green Bay at Tampa Bay, game 2026_04_GB_TB, uses Jordan Love from the saved weekly player file (00-0036264). The schedule file had listed Jalon Daniels in the home quarterback cell on that row, and that cell was replaced with Jordan Love. Week 5 Tampa Bay at Dallas was left as saved. Washington at London, game 2026_04_IND_WAS, keeps Jayden Daniels. The 2026 injury file lists him as limited with an elbow in week 4 and has no Marcus Mariota starter row. The saved ESPN scoreboard names Mariota as a passing leader, with no starter designation and no active designation for Jayden Daniels. Jayden Daniels and Marcus Mariota stay on Washington.
+
 spread_line, total_line, home_moneyline, and div_game are model features when the schedule file has those columns. roof, surface, temp, wind, away_qb_id, and home_qb_id are carried from that file. temp and wind are blank on the current week, so they are not filled and are not model features.
 
 Completed rows: 333
