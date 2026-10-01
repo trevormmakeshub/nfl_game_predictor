@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.special import expit
 from sklearn.linear_model import LinearRegression, RidgeClassifier
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +40,26 @@ BASE_FEATURES = (
     "home_rest_days",
     "away_rest_days",
 )
+SCHEDULE_FIELDS = (
+    "spread_line",
+    "total_line",
+    "home_moneyline",
+    "roof",
+    "surface",
+    "temp",
+    "wind",
+    "div_game",
+    "away_qb_id",
+    "home_qb_id",
+)
+LINE_FEATURES = ("spread_line", "total_line", "home_moneyline", "div_game")
+QB_FEATURES = (
+    "home_qb_passer_rating",
+    "away_qb_passer_rating",
+    "home_qb_int_rate",
+    "away_qb_int_rate",
+)
+TEXT_FIELDS = {"roof", "surface", "away_qb_id", "home_qb_id"}
 UA = {"User-Agent": "Mozilla/5.0"}
 
 
@@ -126,6 +147,15 @@ def as_int(value):
     return int(number)
 
 
+def as_float(value):
+    if blank(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def as_date(value) -> date | None:
     if blank(value):
         return None
@@ -145,6 +175,7 @@ def read_csv(path: Path) -> pd.DataFrame:
 
 def load_schedule() -> list[dict]:
     frame = read_csv(DATA / "schedules" / "games.csv")
+    present = [name for name in SCHEDULE_FIELDS if name in frame.columns]
     games = []
     for row in frame.itertuples(index=False):
         raw = row._asdict()
@@ -158,19 +189,26 @@ def load_schedule() -> list[dict]:
         home = "" if blank(raw.get("home_team")) else str(raw.get("home_team")).strip()
         if game_date is None or week is None or not away or not home:
             continue
-        games.append(
-            {
-                "game_id": "" if blank(raw.get("game_id")) else str(raw.get("game_id")).strip(),
-                "season": season,
-                "week": week,
-                "game_type": game_type,
-                "date": game_date,
-                "away": away,
-                "home": home,
-                "away_score": as_int(raw.get("away_score")),
-                "home_score": as_int(raw.get("home_score")),
-            }
-        )
+        game = {
+            "game_id": "" if blank(raw.get("game_id")) else str(raw.get("game_id")).strip(),
+            "season": season,
+            "week": week,
+            "game_type": game_type,
+            "date": game_date,
+            "away": away,
+            "home": home,
+            "away_score": as_int(raw.get("away_score")),
+            "home_score": as_int(raw.get("home_score")),
+        }
+        for name in present:
+            raw_value = raw.get(name)
+            if name in TEXT_FIELDS:
+                game[name] = None if blank(raw_value) else str(raw_value).strip()
+            elif name == "div_game":
+                game[name] = as_int(raw_value)
+            else:
+                game[name] = as_float(raw_value)
+        games.append(game)
     games.sort(key=lambda game: (game["date"], game["season"], game["week"], game["game_id"]))
     return games
 
@@ -219,7 +257,101 @@ def prior_value(table: dict | None, season: int, week: int, team: str):
     return table["values"].get(key, 0.0)
 
 
-def features_for(state: dict, game: dict, injuries: dict | None, snaps: dict | None) -> dict:
+def clamp_rating(value: float) -> float:
+    return max(0.0, min(2.375, value))
+
+
+def passer_rating(completions: float, attempts: float, yards: float, touchdowns: float, interceptions: float):
+    if attempts <= 0:
+        return None
+    rating_parts = (
+        clamp_rating((completions / attempts - 0.3) * 5),
+        clamp_rating((yards / attempts - 3) * 0.25),
+        clamp_rating((touchdowns / attempts) * 20),
+        clamp_rating(2.375 - (interceptions / attempts) * 25),
+    )
+    return sum(rating_parts) / 6 * 100
+
+
+def load_qb_log(games: list[dict]) -> dict[str, list[dict]] | None:
+    paths = [
+        DATA / "stats_player" / "stats_player_week_2025.csv",
+        DATA / "stats_player" / "stats_player_week_2026.csv",
+    ]
+    existing = [path for path in paths if path.exists()]
+    if not existing:
+        return None
+    frame = pd.concat([read_csv(path) for path in existing], ignore_index=True)
+    needed = [
+        "player_id",
+        "game_id",
+        "attempts",
+        "completions",
+        "passing_yards",
+        "passing_tds",
+        "passing_interceptions",
+    ]
+    if any(column not in frame.columns for column in needed):
+        return None
+    dates = {game["game_id"]: game["date"] for game in games if completed(game)}
+    frame = frame[frame["game_id"].astype(str).isin(dates)].copy()
+    grouped: dict[str, list[dict]] = {}
+    for raw in frame[needed].to_dict("records"):
+        game_id = "" if blank(raw.get("game_id")) else str(raw.get("game_id")).strip()
+        player_id = "" if blank(raw.get("player_id")) else str(raw.get("player_id")).strip()
+        if game_id not in dates or not player_id:
+            continue
+        attempts = as_float(raw.get("attempts"))
+        completions = as_float(raw.get("completions"))
+        yards = as_float(raw.get("passing_yards"))
+        touchdowns = as_float(raw.get("passing_tds"))
+        interceptions = as_float(raw.get("passing_interceptions"))
+        if None in (attempts, completions, yards, touchdowns, interceptions):
+            continue
+        grouped.setdefault(player_id, []).append(
+            {
+                "game_id": game_id,
+                "date": dates[game_id],
+                "attempts": attempts,
+                "completions": completions,
+                "yards": yards,
+                "touchdowns": touchdowns,
+                "interceptions": interceptions,
+            }
+        )
+    for rows in grouped.values():
+        rows.sort(key=lambda item: (item["date"], item["game_id"]))
+    return grouped
+
+
+def prior_qb(qb_log: dict[str, list[dict]] | None, player_id: str | None, game_date: date, game_id: str):
+    if qb_log is None or not player_id:
+        return None, None
+    attempts = completions = yards = touchdowns = interceptions = 0.0
+    used = False
+    for item in qb_log.get(player_id, []):
+        if item["date"] > game_date:
+            break
+        if item["date"] == game_date or item["game_id"] == game_id:
+            continue
+        attempts += item["attempts"]
+        completions += item["completions"]
+        yards += item["yards"]
+        touchdowns += item["touchdowns"]
+        interceptions += item["interceptions"]
+        used = True
+    if not used or attempts <= 0:
+        return None, None
+    return passer_rating(completions, attempts, yards, touchdowns, interceptions), interceptions / attempts
+
+
+def features_for(
+    state: dict,
+    game: dict,
+    injuries: dict | None,
+    snaps: dict | None,
+    qb_log: dict | None,
+) -> dict:
     home = state.get(game["home"])
     away = state.get(game["away"])
     row = {name: None for name in BASE_FEATURES}
@@ -245,6 +377,17 @@ def features_for(state: dict, game: dict, injuries: dict | None, snaps: dict | N
             row["away_prior_injuries"] = prior_value(injuries, away["season"], away["week"], game["away"])
         if snaps is not None:
             row["away_prior_snaps"] = prior_value(snaps, away["season"], away["week"], game["away"])
+    for name in LINE_FEATURES:
+        if name in game:
+            value = game[name]
+            row[name] = None if value is None else float(value)
+    if qb_log is not None:
+        home_rating, home_rate = prior_qb(qb_log, game.get("home_qb_id"), game["date"], game["game_id"])
+        away_rating, away_rate = prior_qb(qb_log, game.get("away_qb_id"), game["date"], game["game_id"])
+        row["home_qb_passer_rating"] = home_rating
+        row["away_qb_passer_rating"] = away_rating
+        row["home_qb_int_rate"] = home_rate
+        row["away_qb_int_rate"] = away_rate
     return row
 
 
@@ -326,6 +469,29 @@ def write_csv(path: Path, rows: list[dict], columns: list[str]) -> None:
             writer.writerow(out)
 
 
+def mark_lean(row: dict) -> None:
+    total = row.get("predicted_points")
+    line = row.get("total_line")
+    if total is None or line is None:
+        row["total_lean"] = None
+        return
+    diff = float(total) - float(line)
+    if diff >= 3:
+        row["total_lean"] = "lean_over"
+    elif diff <= -3:
+        row["total_lean"] = "lean_under"
+    else:
+        row["total_lean"] = "no_lean"
+
+
+def clear_prediction(row: dict) -> None:
+    row["home_win_prob"] = None
+    row["predicted_away_points"] = None
+    row["predicted_home_points"] = None
+    row["predicted_points"] = None
+    row["total_lean"] = None
+
+
 def train(completed_rows: list[dict], next_rows: list[dict], features: list[str]) -> tuple[int, list[dict]]:
     trainable = []
     for row in completed_rows:
@@ -336,6 +502,8 @@ def train(completed_rows: list[dict], next_rows: list[dict], features: list[str]
         trainable.append(row)
     if len(trainable) < 2 or len({row["home_win"] for row in trainable}) < 2:
         print("train_rows", len(trainable), flush=True)
+        for row in next_rows:
+            clear_prediction(row)
         return len(trainable), next_rows
     frame = pd.DataFrame(trainable)
     matrix = frame[features].to_numpy(dtype=float)
@@ -348,17 +516,23 @@ def train(completed_rows: list[dict], next_rows: list[dict], features: list[str]
     ridge.fit(scaled, target)
     home_points = LinearRegression().fit(scaled, frame["home_score"].to_numpy(dtype=float))
     away_points = LinearRegression().fit(scaled, frame["away_score"].to_numpy(dtype=float))
+    positive_is_home = int(ridge.classes_[1]) == 1
     for row in next_rows:
         if any(row.get(feature) is None for feature in features):
-            row["predicted_home_win"] = None
-            row["predicted_away_points"] = None
-            row["predicted_home_points"] = None
+            clear_prediction(row)
             continue
         sample = (np.array([row[feature] for feature in features], dtype=float) - center) / scale
         sample = sample.reshape(1, -1)
-        row["predicted_home_win"] = int(ridge.predict(sample)[0])
-        row["predicted_away_points"] = float(away_points.predict(sample)[0])
-        row["predicted_home_points"] = float(home_points.predict(sample)[0])
+        decision = float(ridge.decision_function(sample)[0])
+        if not positive_is_home:
+            decision = -decision
+        away = float(away_points.predict(sample)[0])
+        home = float(home_points.predict(sample)[0])
+        row["home_win_prob"] = float(expit(decision))
+        row["predicted_away_points"] = away
+        row["predicted_home_points"] = home
+        row["predicted_points"] = away + home
+        mark_lean(row)
     print("train_rows", len(trainable), flush=True)
     return len(trainable), next_rows
 
@@ -484,6 +658,13 @@ def main() -> int:
         print("rows kept", flush=True)
         return 0
 
+    return build_model(games, sleeper, saved, skipped, espn_status, nfl_status)
+
+
+def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
+    done = [game for game in games if completed(game)]
+    min_date = min(game["date"] for game in done)
+    max_date = max(game["date"] for game in done)
     injury_paths = [DATA / "injuries" / "injuries_2025.csv", DATA / "injuries" / "injuries_2026.csv"]
     snap_paths = [DATA / "snap_counts" / "snap_counts_2025.csv", DATA / "snap_counts" / "snap_counts_2026.csv"]
     injuries = count_table([path for path in injury_paths if path.exists()], None)
@@ -501,13 +682,26 @@ def main() -> int:
         features.extend(["home_prior_injuries", "away_prior_injuries"])
     if snaps is not None:
         features.extend(["home_prior_snaps", "away_prior_snaps"])
+    schedule_columns = [name for name in SCHEDULE_FIELDS if games and name in games[0]]
+    for name in LINE_FEATURES:
+        if name in schedule_columns:
+            features.append(name)
+    qb_log = None
+    if "home_qb_id" not in schedule_columns:
+        skipped.append("home_qb_id is missing from the schedule file, so the quarterback features were skipped")
+    else:
+        qb_log = load_qb_log(games)
+        if qb_log is None:
+            skipped.append("starting quarterback prior lines were left out because the weekly player stat files had no passing line")
+        else:
+            features.extend(QB_FEATURES)
 
     next_ids = {game["game_id"] for game in choose_next(games, sleeper)}
     state: dict = {}
     completed_rows = []
     next_rows = []
     for game in games:
-        feature_row = features_for(state, game, injuries, snaps)
+        feature_row = features_for(state, game, injuries, snaps, qb_log)
         if completed(game):
             home_win = None
             if game["home_score"] > game["away_score"]:
@@ -521,7 +715,8 @@ def main() -> int:
 
     train_rows, next_rows = train(completed_rows, next_rows, features)
     id_columns = ["game_id", "date", "season", "week", "game_type", "away", "home", "away_score", "home_score", "home_win"]
-    write_csv(ARTIFACTS / "nfl_completed.csv", completed_rows, id_columns + features)
+    carried = [name for name in schedule_columns if name not in features]
+    write_csv(ARTIFACTS / "nfl_completed.csv", completed_rows, id_columns + carried + features)
     next_columns = [
         "game_id",
         "date",
@@ -530,24 +725,33 @@ def main() -> int:
         "game_type",
         "away",
         "home",
+        *carried,
         *features,
-        "predicted_home_win",
+        "home_win_prob",
         "predicted_away_points",
         "predicted_home_points",
+        "predicted_points",
+        "total_lean",
     ]
     write_csv(ARTIFACTS / "nfl_next_games.csv", next_rows, next_columns)
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     MAX_PATH.write_text(max_date.isoformat() + "\n", encoding="utf-8", newline="\n")
-    saved.extend(["artifacts/nfl_completed.csv", "artifacts/nfl_next_games.csv"])
+    for artifact in ("artifacts/nfl_completed.csv", "artifacts/nfl_next_games.csv"):
+        if artifact not in saved:
+            saved.append(artifact)
     write_readme(max_date.isoformat())
-    date_ok = date(2025, 9, 1) <= min_date <= date(2026, 2, 28) and max_date >= date(2026, 9, 28)
+    date_ok = max_date >= date(2026, 9, 28)
     write_notes(
         [
             "Run python scripts/refresh_week.py once a week during the season. It does not run on a timer.",
             "",
             "nflverse is the recorded-stats source. ESPN is a live score check and is not copied into the training scores. Sleeper supplies the current week only. nfl.com is one score-strip request. Real is not a source.",
             "",
-            "The training rows use only earlier games: win rate, points per game, rest days, and prior-week injury and snap counts when those files saved. A game is not a feature of itself. The win model is a ridge classifier. Points use linear regression. No odds and no props.",
+            "The training rows use only earlier games: win rate, points per game, rest days, prior-week injury and snap counts, and the starting quarterback's prior-games passer rating and interception rate. A game does not train on its own score or its own quarterback line. The win model is a ridge classifier. Points use linear regression.",
+            "",
+            "The line is the recorded schedule line, not a live book price, and this does not price a bet. A lean is not a wager.",
+            "",
+            "spread_line, total_line, home_moneyline, and div_game are model features when the schedule file has those columns. roof, surface, temp, wind, away_qb_id, and home_qb_id are carried from that file. temp and wind are blank on the current week, so they are not filled and are not model features.",
             "",
             f"Completed rows: {len(completed_rows)}",
             f"Training rows: {train_rows}",
@@ -569,8 +773,12 @@ def main() -> int:
         ]
     )
     print("rows", len(completed_rows), flush=True)
+    print("train_rows", train_rows, flush=True)
     print("feature_count", len(features), flush=True)
+    print("min_date", min_date.isoformat(), flush=True)
+    print("max_date", max_date.isoformat(), flush=True)
     print("date_check", "pass" if date_ok else "fail", flush=True)
+    print("features", ",".join(features), flush=True)
     return 0 if date_ok and train_rows > 1 else 1
 
 

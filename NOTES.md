@@ -2,11 +2,15 @@ Run python scripts/refresh_week.py once a week during the season. It does not ru
 
 nflverse is the recorded-stats source. ESPN is a live score check and is not copied into the training scores. Sleeper supplies the current week only. nfl.com is one score-strip request. Real is not a source.
 
-The training rows use only earlier games: win rate, points per game, rest days, and prior-week injury and snap counts when those files saved. A game is not a feature of itself. The win model is a ridge classifier. Points use linear regression. No odds and no props.
+The training rows use only earlier games: win rate, points per game, rest days, prior-week injury and snap counts, and the starting quarterback's prior-games passer rating and interception rate. A game does not train on its own score or its own quarterback line. The win model is a ridge classifier. Points use linear regression.
+
+The line is the recorded schedule line, not a live book price, and this does not price a bet. A lean is not a wager.
+
+spread_line, total_line, home_moneyline, and div_game are model features when the schedule file has those columns. roof, surface, temp, wind, away_qb_id, and home_qb_id are carried from that file. temp and wind are blank on the current week, so they are not filled and are not model features.
 
 Completed rows: 333
-Training rows: 316
-Feature count: 10
+Training rows: 307
+Feature count: 18
 Minimum date: 2025-09-04
 Maximum date: 2026-09-28
 Date check: pass
