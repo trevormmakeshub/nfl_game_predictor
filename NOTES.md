@@ -1,0 +1,51 @@
+Run python scripts/refresh_week.py once a week during the season. It does not run on a timer.
+
+nflverse is the recorded-stats source. ESPN is a live score check and is not copied into the training scores. Sleeper supplies the current week only. nfl.com is one score-strip request. Real is not a source.
+
+The training rows use only earlier games: win rate, points per game, rest days, and prior-week injury and snap counts when those files saved. A game is not a feature of itself. The win model is a ridge classifier. Points use linear regression. No odds and no props.
+
+Completed rows: 333
+Training rows: 316
+Feature count: 10
+Minimum date: 2025-09-04
+Maximum date: 2026-09-28
+Date check: pass
+
+Files saved:
+- data/schedules/games.csv
+- data/stats_player/stats_player_post_2025.csv
+- data/stats_player/stats_player_regpost_2025.csv
+- data/stats_player/stats_player_regpost_2026.csv
+- data/stats_player/stats_player_reg_2025.csv
+- data/stats_player/stats_player_reg_2026.csv
+- data/stats_player/stats_player_week_2025.csv
+- data/stats_player/stats_player_week_2026.csv
+- data/stats_team/stats_team_post_2025.csv
+- data/stats_team/stats_team_regpost_2025.csv
+- data/stats_team/stats_team_regpost_2026.csv
+- data/stats_team/stats_team_reg_2025.csv
+- data/stats_team/stats_team_reg_2026.csv
+- data/stats_team/stats_team_week_2025.csv
+- data/stats_team/stats_team_week_2026.csv
+- data/injuries/injuries_2025.csv
+- data/injuries/injuries_2026.csv
+- data/depth_charts/depth_charts_2025.csv
+- data/depth_charts/depth_charts_2026.csv
+- data/snap_counts/snap_counts_2025.csv
+- data/snap_counts/snap_counts_2026.csv
+- data/nextgen_stats/ngs_passing.csv.gz
+- data/nextgen_stats/ngs_receiving.csv.gz
+- data/nextgen_stats/ngs_rushing.csv.gz
+- data/live/espn_scoreboard.json
+- data/live/sleeper_state.json
+- artifacts/nfl_completed.csv
+- artifacts/nfl_next_games.csv
+
+Files skipped:
+- participation was not requested and was not downloaded
+- https://www.nfl.com/ajax/scorestrip?season=2026&seasonType=REG&week=4 HTML
+
+ESPN status: 200
+nfl.com status: HTML
+
+FanGraphs, stats.nba.com, nba_api, and football-data.org were not called. Raw XY tracking was not downloaded.
