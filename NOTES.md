@@ -59,3 +59,5 @@ ESPN status: 200
 nfl.com status: HTML
 
 FanGraphs, stats.nba.com, nba_api, and football-data.org were not called. Raw XY tracking was not downloaded.
+
+This is the roster cheat sheet. It does not price a bet. The win model still uses the quarterback features only.
