@@ -61,3 +61,7 @@ nfl.com status: HTML
 FanGraphs, stats.nba.com, nba_api, and football-data.org were not called. Raw XY tracking was not downloaded.
 
 This is the roster cheat sheet. It does not price a bet. The win model still uses the quarterback features only.
+
+roster check pass, 3 passes
+
+roster_2026_only.csv is the prop sheet. The mixed file is not. This does not price a bet.
