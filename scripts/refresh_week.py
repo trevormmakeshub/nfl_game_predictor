@@ -2,8 +2,8 @@
 
 Run once a week during the season. This file does not start a timer.
 Each run downloads the public nflverse release files, makes one ESPN
-scoreboard request, one Sleeper state request, and one nfl.com score-strip
-request. It retrains only when the latest completed-game date has moved.
+scoreboard request, and one Sleeper state request. It does not request
+nfl.com. It retrains only when the latest completed-game date has moved.
 """
 
 from __future__ import annotations
@@ -18,8 +18,53 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.special import expit
-from sklearn.linear_model import LinearRegression, RidgeClassifier
+
+try:
+    from scipy.special import expit
+    from sklearn.linear_model import LinearRegression, RidgeClassifier
+except ImportError:
+    # The installed scipy extension is blocked on this machine.
+    # These are the same ridge and linear fits the script calls, in numpy.
+    def expit(value):
+        array = np.asarray(value, dtype=float)
+        return 1.0 / (1.0 + np.exp(-array))
+
+    def _fit_coef(samples, target, alpha):
+        samples = np.asarray(samples, dtype=float)
+        target = np.asarray(target, dtype=float).reshape(-1)
+        center = samples.mean(axis=0)
+        target_center = float(target.mean())
+        shifted = samples - center
+        gram = shifted.T @ shifted
+        if alpha:
+            gram = gram + (alpha * np.eye(samples.shape[1]))
+        coef = np.linalg.solve(gram, shifted.T @ (target - target_center))
+        intercept = target_center - float(center @ coef)
+        return coef.reshape(1, -1), intercept
+
+    class RidgeClassifier:
+        def __init__(self, alpha=1.0):
+            self.alpha = alpha
+
+        def fit(self, samples, target):
+            target = np.asarray(target)
+            self.classes_ = np.unique(target)
+            signed = np.where(target == self.classes_[1], 1.0, -1.0)
+            self.coef_, self.intercept_ = _fit_coef(samples, signed, self.alpha)
+            return self
+
+        def decision_function(self, samples):
+            samples = np.asarray(samples, dtype=float)
+            return (samples @ self.coef_.ravel()) + float(self.intercept_)
+
+    class LinearRegression:
+        def fit(self, samples, target):
+            self.coef_, self.intercept_ = _fit_coef(samples, target, 0.0)
+            return self
+
+        def predict(self, samples):
+            samples = np.asarray(samples, dtype=float)
+            return (samples @ self.coef_.ravel()) + float(self.intercept_)
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -644,7 +689,7 @@ def write_readme(max_date: str) -> None:
         "# NFL Game Predictor 2026\n\n"
         f"2025 through {max_date}. nflverse is the recorded-stats source. "
         "ESPN is the live score check. Sleeper is the current week only. "
-        "nfl.com is a one-request check. Real is not a source. "
+        "nfl.com is not requested. Real is not a source. "
         "Weekly refresh is manual. This does not price a bet.\n\n"
         "Run `python scripts/refresh_week.py` once a week during the season.\n",
         encoding="utf-8",
@@ -738,35 +783,8 @@ def main() -> int:
         print(f"sleeper {sleeper_status}", flush=True)
 
     nfl_status = "not requested"
-    nfl_url = ""
-    if sleeper:
-        nfl_url = (
-            "https://www.nfl.com/ajax/scorestrip"
-            f"?season={sleeper['season']}&seasonType={sleeper['season_type']}&week={sleeper['week']}"
-        )
-        nfl_status_code, nfl_type, nfl_body = fetch_text(nfl_url)
-        nfl_path = DATA / "live" / "nfl_scorestrip.json"
-        if nfl_status_code in {403, 404} or looks_like_html(nfl_body, nfl_type):
-            kind = "HTML" if looks_like_html(nfl_body, nfl_type) else str(nfl_status_code)
-            nfl_status = kind
-            skipped.append(f"{nfl_url} {kind}")
-        elif nfl_status_code == 200:
-            text = nfl_body.decode("utf-8", errors="replace").lstrip()
-            if text.startswith("{") or text.startswith("["):
-                nfl_path.parent.mkdir(parents=True, exist_ok=True)
-                nfl_path.write_bytes(nfl_body)
-                saved.append(nfl_path.relative_to(ROOT).as_posix())
-                nfl_status = "200 JSON"
-            else:
-                nfl_status = "200 not JSON"
-                skipped.append(f"{nfl_url} HTTP 200 but the body was not JSON")
-        else:
-            nfl_status = str(nfl_status_code)
-            skipped.append(f"{nfl_url} HTTP {nfl_status_code}")
-        print("nfl.com", nfl_status, flush=True)
-    else:
-        skipped.append("nfl.com score strip was not requested because the Sleeper state did not include a week")
-        print("nfl.com skipped", flush=True)
+    skipped.append("nfl.com was not requested")
+    print("nfl.com skipped", flush=True)
 
     schedule_path = DATA / "schedules" / "games.csv"
     if not schedule_path.exists():
@@ -898,7 +916,7 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
         [
             "Run python scripts/refresh_week.py once a week during the season. It does not run on a timer.",
             "",
-            "nflverse is the recorded-stats source. ESPN is a live score check and is not copied into the training scores. Sleeper supplies the current week only. nfl.com is one score-strip request. Real is not a source.",
+            "nflverse is the recorded-stats source. ESPN is a live score check and is not copied into the training scores. Sleeper supplies the current week only. nfl.com is not requested. Real is not a source.",
             "",
             "The training rows use only earlier games: win rate, points per game, rest days, prior-week injury and snap counts, and the starting quarterback's prior-games passer rating and interception rate. A game does not train on its own score or its own quarterback line. The win model is a ridge classifier. Points use linear regression.",
             "",
