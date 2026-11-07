@@ -14,11 +14,11 @@ Rows that could not be scored: 25
 
 spread_line, total_line, home_moneyline, and div_game are model features when the schedule file has those columns. roof, surface, temp, wind, away_qb_id, and home_qb_id are carried from that file. temp and wind are blank on the current week, so they are not filled and are not model features.
 
-Completed rows: 349
-Training rows: 323
+Completed rows: 407
+Training rows: 380
 Feature count: 18
 Minimum date: 2025-09-04
-Maximum date: 2026-10-05
+Maximum date: 2026-11-05
 Date check: pass
 
 Files saved:
@@ -59,7 +59,3 @@ ESPN status: 200
 nfl.com status: not requested
 
 FanGraphs, stats.nba.com, nba_api, and football-data.org were not called. Raw XY tracking was not downloaded.
-
-This refresh updates the depth charts, the stat files, and the player status for each team. A blank player status means the injury file has no row. It does not price a bet.
-
-this is the weekly roster refresh. It does not price a bet.
