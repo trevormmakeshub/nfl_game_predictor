@@ -1,5 +1,5 @@
 bin,count,home_win_rate,calibrated,note
-50-55,60,0.516667,yes,
-55-60,56,0.642857,yes,
-60-65,38,0.763158,yes,
-65-plus,27,0.962963,yes,
+50-55,70,0.471429,no,observed home-win rate is below the bin floor
+55-60,73,0.657534,yes,observed home-win rate is at least the bin floor
+60-65,42,0.809524,yes,observed home-win rate is at least the bin floor
+65-plus,32,0.9375,yes,observed home-win rate is at least the bin floor

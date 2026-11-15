@@ -14,11 +14,12 @@ Rows that could not be scored: 25
 
 spread_line, total_line, home_moneyline, and div_game are model features when the schedule file has those columns. roof, surface, temp, wind, away_qb_id, and home_qb_id are carried from that file. temp and wind are blank on the current week, so they are not filled and are not model features.
 
-Completed rows: 407
-Training rows: 380
+Completed rows: 422
+Training rows: 395
 Feature count: 18
 Minimum date: 2025-09-04
-Maximum date: 2026-11-05
+Maximum date: 2026-11-12
+Next games: 13
 Date check: pass
 
 Files saved:
@@ -50,6 +51,8 @@ Files saved:
 - data/live/sleeper_state.json
 - artifacts/nfl_completed.csv
 - artifacts/nfl_next_games.csv
+- artifacts/seeds.csv
+- artifacts/calibration.csv
 
 Files skipped:
 - participation was not requested and was not downloaded

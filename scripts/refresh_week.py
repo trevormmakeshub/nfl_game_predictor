@@ -577,6 +577,73 @@ def choose_next(games: list[dict], sleeper: dict | None) -> list[dict]:
     return [game for game in future if game["season"] == first["season"] and game["week"] == first["week"]]
 
 
+def write_seeds(rows: list[dict]) -> None:
+    """Copy next-game projections. Spread and total stay the recorded schedule line."""
+    seed_rows = [
+        {
+            "date": row.get("date"),
+            "away": row.get("away"),
+            "home": row.get("home"),
+            "home_win_prob": row.get("home_win_prob"),
+            "predicted_points": row.get("predicted_points"),
+            "spread_line": row.get("spread_line"),
+            "total_line": row.get("total_line"),
+            "lean": row.get("total_lean"),
+            "line": "recorded schedule line, not a live book price, not a bet",
+        }
+        for row in rows
+    ]
+    write_csv(
+        ARTIFACTS / "seeds.csv",
+        seed_rows,
+        ["date", "away", "home", "home_win_prob", "predicted_points", "spread_line", "total_line", "lean", "line"],
+    )
+
+
+def write_calibration(rows: list[dict]) -> None:
+    """Bin in-sample home win probabilities. A bin is yes only when its rate clears the floor."""
+    bins = (
+        ("50-55", 0.50, 0.55),
+        ("55-60", 0.55, 0.60),
+        ("60-65", 0.60, 0.65),
+        ("65-plus", 0.65, 1.01),
+    )
+    out = []
+    for name, low, high in bins:
+        group = [
+            row for row in rows
+            if row.get("home_win") is not None
+            and row.get("home_win_prob") is not None
+            and low <= float(row["home_win_prob"]) < high
+        ]
+        count = len(group)
+        if count == 0:
+            rate = None
+            calibrated = "no"
+            note = "no rows"
+        else:
+            rate = sum(int(row["home_win"]) for row in group) / count
+            if count < 20:
+                calibrated = "no"
+                note = "count under 20"
+            elif rate >= low:
+                calibrated = "yes"
+                note = "observed home-win rate is at least the bin floor"
+            else:
+                calibrated = "no"
+                note = "observed home-win rate is below the bin floor"
+        out.append(
+            {
+                "bin": name,
+                "count": count,
+                "home_win_rate": rate,
+                "calibrated": calibrated,
+                "note": note,
+            }
+        )
+    write_csv(ARTIFACTS / "calibration.csv", out, ["bin", "count", "home_win_rate", "calibrated", "note"])
+
+
 def write_csv(path: Path, rows: list[dict], columns: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -888,6 +955,11 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
         completed_rows,
         id_columns + carried + features + ["home_win_prob"],
     )
+    for row in next_rows:
+        row["away_team"] = row.get("away")
+        row["home_team"] = row.get("home")
+        row["predicted_away_score"] = row.get("predicted_away_points")
+        row["predicted_home_score"] = row.get("predicted_home_points")
     next_columns = [
         "game_id",
         "date",
@@ -896,18 +968,29 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
         "game_type",
         "away",
         "home",
+        "away_team",
+        "home_team",
         *carried,
         *features,
         "home_win_prob",
         "predicted_away_points",
         "predicted_home_points",
         "predicted_points",
+        "predicted_away_score",
+        "predicted_home_score",
         "total_lean",
     ]
     write_csv(ARTIFACTS / "nfl_next_games.csv", next_rows, next_columns)
+    write_seeds(next_rows)
+    write_calibration(completed_rows)
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     MAX_PATH.write_text(max_date.isoformat() + "\n", encoding="utf-8", newline="\n")
-    for artifact in ("artifacts/nfl_completed.csv", "artifacts/nfl_next_games.csv"):
+    for artifact in (
+        "artifacts/nfl_completed.csv",
+        "artifacts/nfl_next_games.csv",
+        "artifacts/seeds.csv",
+        "artifacts/calibration.csv",
+    ):
         if artifact not in saved:
             saved.append(artifact)
     write_readme(max_date.isoformat())
@@ -935,6 +1018,7 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
             f"Feature count: {len(features)}",
             f"Minimum date: {min_date.isoformat()}",
             f"Maximum date: {max_date.isoformat()}",
+            f"Next games: {len(next_rows)}",
             f"Date check: {'pass' if date_ok else 'fail'}",
             "",
             "Files saved:",
@@ -954,6 +1038,7 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
     print("feature_count", len(features), flush=True)
     print("min_date", min_date.isoformat(), flush=True)
     print("max_date", max_date.isoformat(), flush=True)
+    print("next_rows", len(next_rows), flush=True)
     print("date_check", "pass" if date_ok else "fail", flush=True)
     print("features", ",".join(features), flush=True)
     return 0 if date_ok and train_rows > 1 else 1
