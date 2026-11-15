@@ -46,3 +46,5 @@ ESPN status: 200
 nfl.com status: not requested
 
 FanGraphs, stats.nba.com, nba_api, and football-data.org were not called. Raw XY tracking was not downloaded.
+
+Roster sheets were rebuilt by scripts/build_roster.py from the week files already on disk. The 2026 sheet has 1,790 rows, weeks 1 through 10, all 32 teams, and the required positions. The mixed 2025-2026 sheet has 2,860 rows. The depth-chart stamp is 2026-11-14T14:04:32Z. A starter is the first charted player at that position who is not Out on the team's latest injury week. Jordan Love is Green Bay. Baker Mayfield is the Tampa Bay starter. Jayden Daniels is Washington. Jalon Daniels is Tampa Bay and is not the starter. Snaps that do not match the display name and team stay blank. The sheets do not price a bet.
