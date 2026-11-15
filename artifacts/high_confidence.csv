@@ -1,0 +1,5 @@
+game_id,date,away,home,home_win_prob,pick_side,pick_team,confidence,confidence_tier,predicted_away_points,predicted_home_points,predicted_total,total_lean
+2026_10_BUF_NYJ,2026-11-15,BUF,NYJ,0.376312,away,BUF,0.123688,high,27.586631,21.773019,49.35965,no_lean
+2026_10_HOU_CLE,2026-11-15,HOU,CLE,0.345468,away,HOU,0.154532,high,26.141761,16.6031,42.744861,no_lean
+2026_10_JAX_TEN,2026-11-15,JAX,TEN,0.254551,away,JAX,0.245449,high,30.705727,16.625363,47.33109,no_lean
+2026_10_SF_DAL,2026-11-15,SF,DAL,0.301215,away,SF,0.198785,high,31.963199,22.827684,54.790883,no_lean

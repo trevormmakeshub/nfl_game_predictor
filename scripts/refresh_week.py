@@ -4,6 +4,10 @@ Run once a week during the season. This file does not start a timer.
 Each run downloads the public nflverse release files, makes one ESPN
 scoreboard request, and one Sleeper state request. It does not request
 nfl.com. It retrains only when the latest completed-game date has moved.
+
+`python scripts/refresh_week.py --local` rebuilds the model from the files
+already on disk and does not download. Use that after a code change when
+the schedule date has not moved.
 """
 
 from __future__ import annotations
@@ -11,6 +15,7 @@ from __future__ import annotations
 import csv
 import gzip
 import json
+import sys
 import urllib.error
 import urllib.request
 from datetime import date, datetime
@@ -103,6 +108,20 @@ QB_FEATURES = (
     "away_qb_passer_rating",
     "home_qb_int_rate",
     "away_qb_int_rate",
+)
+RECENT_FEATURES = (
+    "home_recent_win_rate",
+    "away_recent_win_rate",
+    "home_recent_margin",
+    "away_recent_margin",
+)
+HOLDOUT_START = date(2026, 9, 1)
+PREDICTION_COLUMNS = (
+    "predicted_total",
+    "pick_side",
+    "pick_team",
+    "confidence",
+    "confidence_tier",
 )
 TEXT_FIELDS = {"roof", "surface", "away_qb_id", "home_qb_id"}
 UA = {"User-Agent": "Mozilla/5.0"}
@@ -513,6 +532,16 @@ def features_for(
         row["away_qb_passer_rating"] = away_rating
         row["home_qb_int_rate"] = home_rate
         row["away_qb_int_rate"] = away_rate
+    for side in ("home", "away"):
+        slot = state.get(game[side])
+        recent = [] if slot is None else slot.get("recent") or []
+        window = recent[-4:]
+        if window:
+            row[f"{side}_recent_win_rate"] = sum(item[0] for item in window) / len(window)
+            row[f"{side}_recent_margin"] = sum(item[1] for item in window) / len(window)
+        else:
+            row[f"{side}_recent_win_rate"] = None
+            row[f"{side}_recent_margin"] = None
     return row
 
 
@@ -525,10 +554,20 @@ def update_state(state: dict, game: dict) -> None:
     ):
         slot = state.setdefault(
             team,
-            {"games": 0, "wins": 0, "points": 0, "date": game["date"], "season": game["season"], "week": game["week"]},
+            {
+                "games": 0,
+                "wins": 0,
+                "points": 0,
+                "date": game["date"],
+                "season": game["season"],
+                "week": game["week"],
+                "recent": [],
+            },
         )
+        slot.setdefault("recent", [])
         slot["games"] += 1
         slot["points"] += scored
+        slot["recent"].append((1 if scored > allowed else 0, scored - allowed))
         if scored > allowed:
             slot["wins"] += 1
         slot["date"] = game["date"]
@@ -586,6 +625,11 @@ def write_seeds(rows: list[dict]) -> None:
             "home": row.get("home"),
             "home_win_prob": row.get("home_win_prob"),
             "predicted_points": row.get("predicted_points"),
+            "predicted_total": row.get("predicted_total"),
+            "pick_side": row.get("pick_side"),
+            "pick_team": row.get("pick_team"),
+            "confidence": row.get("confidence"),
+            "confidence_tier": row.get("confidence_tier"),
             "spread_line": row.get("spread_line"),
             "total_line": row.get("total_line"),
             "lean": row.get("total_lean"),
@@ -596,12 +640,16 @@ def write_seeds(rows: list[dict]) -> None:
     write_csv(
         ARTIFACTS / "seeds.csv",
         seed_rows,
-        ["date", "away", "home", "home_win_prob", "predicted_points", "spread_line", "total_line", "lean", "line"],
+        [
+            "date", "away", "home", "home_win_prob", "predicted_points", "predicted_total",
+            "pick_side", "pick_team", "confidence", "confidence_tier",
+            "spread_line", "total_line", "lean", "line",
+        ],
     )
 
 
-def write_calibration(rows: list[dict]) -> None:
-    """Bin in-sample home win probabilities. A bin is yes only when its rate clears the floor."""
+def calibration_table(rows: list[dict], split: str) -> list[dict]:
+    """A bin is yes only when its rate clears the floor. Holdout bins stay separate."""
     bins = (
         ("50-55", 0.50, 0.55),
         ("55-60", 0.55, 0.60),
@@ -634,6 +682,7 @@ def write_calibration(rows: list[dict]) -> None:
                 note = "observed home-win rate is below the bin floor"
         out.append(
             {
+                "split": split,
                 "bin": name,
                 "count": count,
                 "home_win_rate": rate,
@@ -641,7 +690,31 @@ def write_calibration(rows: list[dict]) -> None:
                 "note": note,
             }
         )
-    write_csv(ARTIFACTS / "calibration.csv", out, ["bin", "count", "home_win_rate", "calibrated", "note"])
+    return out
+
+
+def write_calibration(rows: list[dict], holdout_rows: list[dict] | None = None) -> None:
+    out = calibration_table(rows, "in_sample")
+    if holdout_rows:
+        out.extend(calibration_table(holdout_rows, "holdout"))
+    write_csv(
+        ARTIFACTS / "calibration.csv",
+        out,
+        ["split", "bin", "count", "home_win_rate", "calibrated", "note"],
+    )
+
+
+def write_high_confidence(rows: list[dict]) -> None:
+    chosen = [row for row in rows if row.get("confidence_tier") == "high"]
+    write_csv(
+        ARTIFACTS / "high_confidence.csv",
+        chosen,
+        [
+            "game_id", "date", "away", "home", "home_win_prob", "pick_side", "pick_team",
+            "confidence", "confidence_tier", "predicted_away_points", "predicted_home_points",
+            "predicted_total", "total_lean",
+        ],
+    )
 
 
 def write_csv(path: Path, rows: list[dict], columns: list[str]) -> None:
@@ -681,7 +754,151 @@ def clear_prediction(row: dict) -> None:
     row["predicted_away_points"] = None
     row["predicted_home_points"] = None
     row["predicted_points"] = None
+    row["predicted_total"] = None
     row["total_lean"] = None
+    row["pick_side"] = None
+    row["pick_team"] = None
+    row["confidence"] = None
+    row["confidence_tier"] = None
+
+
+def annotate_prediction(row: dict) -> None:
+    """Add the shared pick columns. They copy the model outputs and are not prices."""
+    home_points = row.get("predicted_home_points")
+    away_points = row.get("predicted_away_points")
+    if home_points is not None and away_points is not None:
+        row["predicted_total"] = float(home_points) + float(away_points)
+    else:
+        row["predicted_total"] = row.get("predicted_points")
+    probability = row.get("home_win_prob")
+    if probability is None:
+        row["pick_side"] = None
+        row["pick_team"] = None
+        row["confidence"] = None
+        row["confidence_tier"] = None
+        return
+    probability = float(probability)
+    if probability >= 0.5:
+        row["pick_side"] = "home"
+        row["pick_team"] = row.get("home")
+    else:
+        row["pick_side"] = "away"
+        row["pick_team"] = row.get("away")
+    row["confidence"] = abs(probability - 0.5)
+    if probability >= 0.60 or probability <= 0.40:
+        row["confidence_tier"] = "high"
+    elif probability >= 0.55 or probability <= 0.45:
+        row["confidence_tier"] = "medium"
+    else:
+        row["confidence_tier"] = "low"
+
+
+def log_line(text: str) -> None:
+    path = ARTIFACTS / "refresh.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().isoformat(timespec="seconds")
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(f"{stamp} {text}\n")
+
+
+def ready_rows(rows: list[dict], features: list[str], start: date | None, end: date | None) -> list[dict]:
+    chosen = []
+    for row in rows:
+        if row.get("home_win") is None:
+            continue
+        if any(row.get(feature) is None for feature in features):
+            continue
+        game_date = row["date"] if isinstance(row["date"], date) else date.fromisoformat(str(row["date"]))
+        if start is not None and game_date < start:
+            continue
+        if end is not None and game_date >= end:
+            continue
+        chosen.append(row)
+    return chosen
+
+
+def fit_bundle(rows: list[dict], features: list[str]):
+    frame = pd.DataFrame(rows)
+    matrix = frame[features].to_numpy(dtype=float)
+    center = matrix.mean(axis=0)
+    scale = matrix.std(axis=0)
+    scale[scale == 0] = 1.0
+    scaled = (matrix - center) / scale
+    target = frame["home_win"].to_numpy(dtype=int)
+    ridge = RidgeClassifier(alpha=1.0)
+    ridge.fit(scaled, target)
+    home_points = LinearRegression().fit(scaled, frame["home_score"].to_numpy(dtype=float))
+    away_points = LinearRegression().fit(scaled, frame["away_score"].to_numpy(dtype=float))
+    positive_is_home = int(ridge.classes_[1]) == 1
+    return center, scale, ridge, home_points, away_points, positive_is_home
+
+
+def score_points(row: dict, features: list[str], bundle) -> tuple[float | None, float | None, float | None]:
+    center, scale, ridge, home_points, away_points, positive_is_home = bundle
+    probability = win_probability(row, features, center, scale, ridge, positive_is_home)
+    if probability is None:
+        return None, None, None
+    sample = ((np.array([row[feature] for feature in features], dtype=float) - center) / scale).reshape(1, -1)
+    return probability, float(home_points.predict(sample)[0]), float(away_points.predict(sample)[0])
+
+
+def holdout_metrics(rows: list[dict], features: list[str], required: list[str] | None = None) -> dict | None:
+    """Fit only on earlier games. The test rows keep their own scores out of the features."""
+    needed = features if required is None else required
+    train_rows = ready_rows(rows, needed, None, HOLDOUT_START)
+    test_rows = ready_rows(rows, needed, HOLDOUT_START, None)
+    if len(train_rows) < 2 or not test_rows or len({row["home_win"] for row in train_rows}) < 2:
+        return None
+    bundle = fit_bundle(train_rows, features)
+    correct = 0
+    total_error = 0.0
+    blend_error = 0.0
+    pairs = []
+    for row in test_rows:
+        probability, home_points, away_points = score_points(row, features, bundle)
+        if probability is None or home_points is None or away_points is None:
+            continue
+        correct += int(int(probability >= 0.5) == int(row["home_win"]))
+        actual_total = float(row["home_score"]) + float(row["away_score"])
+        regression_total = home_points + away_points
+        total_error += abs(regression_total - actual_total)
+        prior_total = float(row["home_ppg"]) + float(row["away_ppg"])
+        blend_error += abs((0.5 * regression_total + 0.5 * prior_total) - actual_total)
+        pairs.append({"home_win": int(row["home_win"]), "home_win_prob": probability})
+    counted = len(pairs)
+    if counted == 0:
+        return None
+    return {
+        "train_rows": len(train_rows),
+        "test_rows": counted,
+        "accuracy": correct / counted,
+        "total_mae": total_error / counted,
+        "blend_mae": blend_error / counted,
+        "pairs": pairs,
+    }
+
+
+def choose_features(completed_rows: list[dict], features: list[str]) -> tuple[list[str], dict]:
+    """Keep recent form only when the 2026 holdout does not get worse."""
+    recent_names = [name for name in RECENT_FEATURES if name not in features]
+    expanded = features + recent_names
+    baseline = holdout_metrics(completed_rows, features, expanded)
+    candidate = holdout_metrics(completed_rows, expanded, expanded)
+    report = {"baseline": baseline, "recent": candidate, "adopted_recent": False, "use_blend": False}
+    chosen = list(features)
+    base_count = len(ready_rows(completed_rows, features, None, None))
+    recent_count = len(ready_rows(completed_rows, expanded, None, None))
+    if baseline is not None and candidate is not None and recent_count == base_count:
+        accuracy_holds = candidate["accuracy"] + 1e-12 >= baseline["accuracy"]
+        points_hold = candidate["total_mae"] <= baseline["total_mae"] + 0.5
+        if accuracy_holds and points_hold:
+            chosen = expanded
+            report["adopted_recent"] = True
+    active = candidate if report["adopted_recent"] else baseline
+    if active is not None and active["blend_mae"] + 0.05 < active["total_mae"]:
+        report["use_blend"] = True
+    report["chosen"] = active
+    return chosen, report
 
 
 def win_probability(row: dict, features: list[str], center, scale, ridge, positive_is_home: bool) -> float | None:
@@ -698,7 +915,12 @@ def win_probability(row: dict, features: list[str], center, scale, ridge, positi
     return float(expit(decision))
 
 
-def train(completed_rows: list[dict], next_rows: list[dict], features: list[str]) -> tuple[int, list[dict]]:
+def train(
+    completed_rows: list[dict],
+    next_rows: list[dict],
+    features: list[str],
+    use_blend: bool = False,
+) -> tuple[int, list[dict]]:
     for row in completed_rows:
         row["home_win_prob"] = None
     trainable = []
@@ -714,38 +936,30 @@ def train(completed_rows: list[dict], next_rows: list[dict], features: list[str]
         for row in next_rows:
             clear_prediction(row)
         return len(trainable), next_rows
-    frame = pd.DataFrame(trainable)
-    matrix = frame[features].to_numpy(dtype=float)
-    center = matrix.mean(axis=0)
-    scale = matrix.std(axis=0)
-    scale[scale == 0] = 1.0
-    scaled = (matrix - center) / scale
-    target = frame["home_win"].to_numpy(dtype=int)
-    ridge = RidgeClassifier(alpha=1.0)
-    ridge.fit(scaled, target)
-    home_points = LinearRegression().fit(scaled, frame["home_score"].to_numpy(dtype=float))
-    away_points = LinearRegression().fit(scaled, frame["away_score"].to_numpy(dtype=float))
-    positive_is_home = int(ridge.classes_[1]) == 1
+    bundle = fit_bundle(trainable, features)
     unscored = 0
     for row in completed_rows:
-        probability = win_probability(row, features, center, scale, ridge, positive_is_home)
+        probability = win_probability(row, features, bundle[0], bundle[1], bundle[2], bundle[5])
         row["home_win_prob"] = probability
         if probability is None:
             unscored += 1
     for row in next_rows:
-        probability = win_probability(row, features, center, scale, ridge, positive_is_home)
-        if probability is None:
+        probability, home, away = score_points(row, features, bundle)
+        if probability is None or home is None or away is None:
             clear_prediction(row)
             continue
-        sample = (np.array([row[feature] for feature in features], dtype=float) - center) / scale
-        sample = sample.reshape(1, -1)
-        away = float(away_points.predict(sample)[0])
-        home = float(home_points.predict(sample)[0])
+        if use_blend and row.get("home_ppg") is not None and row.get("away_ppg") is not None:
+            regression_total = home + away
+            blended_total = 0.5 * regression_total + 0.5 * (float(row["home_ppg"]) + float(row["away_ppg"]))
+            margin = home - away
+            home = (blended_total + margin) / 2
+            away = (blended_total - margin) / 2
         row["home_win_prob"] = probability
-        row["predicted_away_points"] = away
         row["predicted_home_points"] = home
-        row["predicted_points"] = away + home
+        row["predicted_away_points"] = away
+        row["predicted_points"] = home + away
         mark_lean(row)
+        annotate_prediction(row)
     print("train_rows", len(trainable), flush=True)
     print("unscored_completed", unscored, flush=True)
     return len(trainable), next_rows
@@ -758,7 +972,9 @@ def write_readme(max_date: str) -> None:
         "ESPN is the live score check. Sleeper is the current week only. "
         "nfl.com is not requested. Real is not a source. "
         "Weekly refresh is manual. This does not price a bet.\n\n"
-        "Run `python scripts/refresh_week.py` once a week during the season.\n",
+        "Run `python scripts/refresh_week.py` once a week during the season. "
+        "`python scripts/refresh_week.py --local` rebuilds the model from the saved files "
+        "without downloading. Run `python scripts/validate_artifacts.py` after a refresh.\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -814,11 +1030,28 @@ def write_notes(lines: list[str]) -> None:
     NOTES.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8", newline="\n")
 
 
-def main() -> int:
+def model_card_line(label: str, block: dict | None) -> str:
+    if not block:
+        return f"{label}: not computed"
+    return (
+        f"{label}: accuracy {block['accuracy']:.4f}, total MAE {block['total_mae']:.3f}, "
+        f"prior-points blend MAE {block['blend_mae']:.3f}, "
+        f"{block['test_rows']} test games after {block['train_rows']} earlier games, "
+        f"from {HOLDOUT_START.isoformat()}"
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    local = "--local" in args
     saved: list[str] = []
     skipped: list[str] = ["participation was not requested and was not downloaded"]
-    for relative, url in release_files():
-        download(url, DATA / relative, saved, skipped)
+    if local:
+        skipped.append("local rebuild did not download")
+        print("local rebuild", flush=True)
+    else:
+        for relative, url in release_files():
+            download(url, DATA / relative, saved, skipped)
 
     espn_status, espn_type, espn_body = fetch_text(ESPN_URL)
     espn_path = DATA / "live" / "espn_scoreboard.json"
@@ -886,11 +1119,19 @@ def main() -> int:
     print("min_date", min_date.isoformat(), flush=True)
     print("max_date", max_date.isoformat(), flush=True)
     previous = MAX_PATH.read_text(encoding="utf-8").strip() if MAX_PATH.exists() else ""
-    if previous == max_date.isoformat() and (ARTIFACTS / "nfl_completed.csv").exists():
+    if (
+        not local
+        and previous == max_date.isoformat()
+        and (ARTIFACTS / "nfl_completed.csv").exists()
+        and (ARTIFACTS / "high_confidence.csv").exists()
+    ):
         print("retrain skipped", flush=True)
         print("rows kept", flush=True)
+        log_line(f"skipped retrain max {max_date.isoformat()}")
         return 0
 
+    if local and sleeper is None:
+        sleeper = load_saved_sleeper()
     return build_model(games, sleeper, saved, skipped, espn_status, nfl_status)
 
 
@@ -946,8 +1187,16 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
         elif game["game_id"] in next_ids:
             next_rows.append({**game, **feature_row})
 
-    train_rows, next_rows = train(completed_rows, next_rows, features)
+    features, model_report = choose_features(completed_rows, features)
+    train_rows, next_rows = train(completed_rows, next_rows, features, model_report["use_blend"])
     unscored = sum(1 for row in completed_rows if row.get("home_win_prob") is None)
+    scored = [
+        row for row in completed_rows
+        if row.get("home_win") is not None and row.get("home_win_prob") is not None
+    ]
+    in_sample_accuracy = None
+    if scored:
+        in_sample_accuracy = sum(int(int(float(row["home_win_prob"]) >= 0.5) == int(row["home_win"])) for row in scored) / len(scored)
     id_columns = ["game_id", "date", "season", "week", "game_type", "away", "home", "away_score", "home_score", "home_win"]
     carried = [name for name in schedule_columns if name not in features]
     write_csv(
@@ -978,11 +1227,18 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
         "predicted_points",
         "predicted_away_score",
         "predicted_home_score",
+        "predicted_total",
+        "pick_side",
+        "pick_team",
+        "confidence",
+        "confidence_tier",
         "total_lean",
     ]
     write_csv(ARTIFACTS / "nfl_next_games.csv", next_rows, next_columns)
     write_seeds(next_rows)
-    write_calibration(completed_rows)
+    holdout_pairs = [] if model_report.get("chosen") is None else model_report["chosen"]["pairs"]
+    write_calibration(completed_rows, holdout_pairs)
+    write_high_confidence(next_rows)
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     MAX_PATH.write_text(max_date.isoformat() + "\n", encoding="utf-8", newline="\n")
     for artifact in (
@@ -990,6 +1246,7 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
         "artifacts/nfl_next_games.csv",
         "artifacts/seeds.csv",
         "artifacts/calibration.csv",
+        "artifacts/high_confidence.csv",
     ):
         if artifact not in saved:
             saved.append(artifact)
@@ -1001,7 +1258,7 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
             "",
             "nflverse is the recorded-stats source. ESPN is a live score check and is not copied into the training scores. Sleeper supplies the current week only. nfl.com is not requested. Real is not a source.",
             "",
-            "The training rows use only earlier games: win rate, points per game, rest days, prior-week injury and snap counts, and the starting quarterback's prior-games passer rating and interception rate. A game does not train on its own score or its own quarterback line. The win model is a ridge classifier. Points use linear regression.",
+            "The training rows use only earlier games: win rate, points per game, rest days, the last four games' win rate and margin when that check improves the 2026 holdout, prior-week injury and snap counts, and the starting quarterback's prior-games passer rating and interception rate. A game does not train on its own score or its own quarterback line. The win model is a ridge classifier. Points use linear regression, plus a half-weight of prior points per game only when that blend lowers the holdout total error.",
             "",
             "The line is the recorded schedule line, not a live book price, and this does not price a bet. A lean is not a wager.",
             "",
@@ -1019,6 +1276,12 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
             f"Minimum date: {min_date.isoformat()}",
             f"Maximum date: {max_date.isoformat()}",
             f"Next games: {len(next_rows)}",
+            f"High-confidence next games: {sum(row.get('confidence_tier') == 'high' for row in next_rows)}",
+            f"In-sample accuracy: {'not computed' if in_sample_accuracy is None else f'{in_sample_accuracy:.4f}'} on {len(scored)} scored rows",
+            model_card_line("Baseline holdout", model_report.get("baseline")),
+            model_card_line("Recent-form holdout", model_report.get("recent")),
+            f"Recent form adopted: {'yes' if model_report['adopted_recent'] else 'no'}",
+            f"Points blend adopted: {'yes' if model_report['use_blend'] else 'no'}",
             f"Date check: {'pass' if date_ok else 'fail'}",
             "",
             "Files saved:",
@@ -1041,7 +1304,47 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
     print("next_rows", len(next_rows), flush=True)
     print("date_check", "pass" if date_ok else "fail", flush=True)
     print("features", ",".join(features), flush=True)
-    return 0 if date_ok and train_rows > 1 else 1
+    print("recent_form", "yes" if model_report["adopted_recent"] else "no", flush=True)
+    print("points_blend", "yes" if model_report["use_blend"] else "no", flush=True)
+    if in_sample_accuracy is not None:
+        print("in_sample_accuracy", f"{in_sample_accuracy:.4f}", flush=True)
+    chosen = model_report.get("chosen")
+    if chosen is not None:
+        print("holdout_accuracy", f"{chosen['accuracy']:.4f}", flush=True)
+        print("holdout_total_mae", f"{chosen['total_mae']:.3f}", flush=True)
+    log_line(
+        f"rows {len(completed_rows)} train {train_rows} next {len(next_rows)} "
+        f"max {max_date.isoformat()} recent {model_report['adopted_recent']} blend {model_report['use_blend']}"
+    )
+    valid = run_validation()
+    print("validation", "pass" if valid == 0 else "fail", flush=True)
+    return 0 if date_ok and train_rows > 1 and valid == 0 else 1
+
+
+def run_validation() -> int:
+    script = ROOT / "scripts" / "validate_artifacts.py"
+    if not script.exists():
+        print("validation script missing", flush=True)
+        return 1
+    completed = subprocess_validate(script)
+    return completed
+
+
+def subprocess_validate(script: Path) -> int:
+    import subprocess
+
+    result = subprocess.run([sys.executable, str(script)], cwd=ROOT, check=False)
+    return int(result.returncode)
+
+
+def load_saved_sleeper() -> dict | None:
+    path = DATA / "live" / "sleeper_state.json"
+    if not path.exists():
+        return None
+    try:
+        return sleeper_week(json.loads(path.read_text(encoding="utf-8")))
+    except json.JSONDecodeError:
+        return None
 
 
 if __name__ == "__main__":

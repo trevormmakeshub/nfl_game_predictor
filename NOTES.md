@@ -2,7 +2,7 @@ Run python scripts/refresh_week.py once a week during the season. It does not ru
 
 nflverse is the recorded-stats source. ESPN is a live score check and is not copied into the training scores. Sleeper supplies the current week only. nfl.com is not requested. Real is not a source.
 
-The training rows use only earlier games: win rate, points per game, rest days, prior-week injury and snap counts, and the starting quarterback's prior-games passer rating and interception rate. A game does not train on its own score or its own quarterback line. The win model is a ridge classifier. Points use linear regression.
+The training rows use only earlier games: win rate, points per game, rest days, the last four games' win rate and margin when that check improves the 2026 holdout, prior-week injury and snap counts, and the starting quarterback's prior-games passer rating and interception rate. A game does not train on its own score or its own quarterback line. The win model is a ridge classifier. Points use linear regression, plus a half-weight of prior points per game only when that blend lowers the holdout total error.
 
 The line is the recorded schedule line, not a live book price, and this does not price a bet. A lean is not a wager.
 
@@ -20,42 +20,26 @@ Feature count: 18
 Minimum date: 2025-09-04
 Maximum date: 2026-11-12
 Next games: 13
+High-confidence next games: 4
+In-sample accuracy: 0.6684 on 395 scored rows
+Baseline holdout: accuracy 0.6269, total MAE 14.513, prior-points blend MAE 12.540, 134 test games after 261 earlier games, from 2026-09-01
+Recent-form holdout: accuracy 0.5746, total MAE 14.010, prior-points blend MAE 12.329, 134 test games after 261 earlier games, from 2026-09-01
+Recent form adopted: no
+Points blend adopted: yes
 Date check: pass
 
 Files saved:
-- data/schedules/games.csv
-- data/stats_player/stats_player_post_2025.csv
-- data/stats_player/stats_player_regpost_2025.csv
-- data/stats_player/stats_player_regpost_2026.csv
-- data/stats_player/stats_player_reg_2025.csv
-- data/stats_player/stats_player_reg_2026.csv
-- data/stats_player/stats_player_week_2025.csv
-- data/stats_player/stats_player_week_2026.csv
-- data/stats_team/stats_team_post_2025.csv
-- data/stats_team/stats_team_regpost_2025.csv
-- data/stats_team/stats_team_regpost_2026.csv
-- data/stats_team/stats_team_reg_2025.csv
-- data/stats_team/stats_team_reg_2026.csv
-- data/stats_team/stats_team_week_2025.csv
-- data/stats_team/stats_team_week_2026.csv
-- data/injuries/injuries_2025.csv
-- data/injuries/injuries_2026.csv
-- data/depth_charts/depth_charts_2025.csv
-- data/depth_charts/depth_charts_2026.csv
-- data/snap_counts/snap_counts_2025.csv
-- data/snap_counts/snap_counts_2026.csv
-- data/nextgen_stats/ngs_passing.csv.gz
-- data/nextgen_stats/ngs_receiving.csv.gz
-- data/nextgen_stats/ngs_rushing.csv.gz
 - data/live/espn_scoreboard.json
 - data/live/sleeper_state.json
 - artifacts/nfl_completed.csv
 - artifacts/nfl_next_games.csv
 - artifacts/seeds.csv
 - artifacts/calibration.csv
+- artifacts/high_confidence.csv
 
 Files skipped:
 - participation was not requested and was not downloaded
+- local rebuild did not download
 - nfl.com was not requested
 
 ESPN status: 200
