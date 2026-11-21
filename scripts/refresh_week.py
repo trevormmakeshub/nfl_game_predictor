@@ -16,6 +16,7 @@ import csv
 import gzip
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import date, datetime
@@ -115,6 +116,10 @@ RECENT_FEATURES = (
     "home_recent_margin",
     "away_recent_margin",
 )
+DEFENSE_FEATURES = (
+    "home_papg",
+    "away_papg",
+)
 HOLDOUT_START = date(2026, 9, 1)
 PREDICTION_COLUMNS = (
     "predicted_total",
@@ -151,25 +156,33 @@ def release_files() -> list[tuple[str, str]]:
 
 
 def download(url: str, dest: Path, saved: list[str], skipped: list[str]) -> bool:
+    """Download one release file. A failed attempt leaves the previous file in place."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, headers=UA)
-    try:
-        with urllib.request.urlopen(request, timeout=90) as response:
-            status = getattr(response, "status", 200)
-            if status != 200:
-                skipped.append(f"{url} HTTP {status}")
-                return False
-            payload = response.read()
-    except urllib.error.HTTPError as exc:
-        skipped.append(f"{url} HTTP {exc.code}")
-        return False
-    except Exception as exc:
-        skipped.append(f"{url} {type(exc).__name__}: {exc}")
-        return False
-    dest.write_bytes(payload)
-    saved.append(dest.relative_to(ROOT).as_posix())
-    print(f"saved {dest.relative_to(ROOT).as_posix()} bytes {len(payload)}", flush=True)
-    return True
+    last_detail = "not tried"
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=90) as response:
+                status = getattr(response, "status", 200)
+                if status != 200:
+                    last_detail = f"HTTP {status}"
+                else:
+                    payload = response.read()
+                    dest.write_bytes(payload)
+                    saved.append(dest.relative_to(ROOT).as_posix())
+                    print(f"saved {dest.relative_to(ROOT).as_posix()} bytes {len(payload)}", flush=True)
+                    return True
+        except urllib.error.HTTPError as exc:
+            last_detail = f"HTTP {exc.code}"
+            if exc.code in {404, 410}:
+                break
+        except Exception as exc:
+            last_detail = f"{type(exc).__name__}: {exc}"
+        if attempt < 2:
+            time.sleep(2 * (attempt + 1))
+    skipped.append(f"{url} {last_detail}")
+    print(f"skip {dest.name} {last_detail}", flush=True)
+    return False
 
 
 def fetch_text(url: str) -> tuple[int, str, bytes]:
@@ -499,6 +512,8 @@ def features_for(
     home = state.get(game["home"])
     away = state.get(game["away"])
     row = {name: None for name in BASE_FEATURES}
+    row["home_papg"] = None
+    row["away_papg"] = None
     if injuries is not None:
         row["home_prior_injuries"] = None
         row["away_prior_injuries"] = None
@@ -508,6 +523,7 @@ def features_for(
     if home and home["games"] > 0:
         row["home_win_rate"] = home["wins"] / home["games"]
         row["home_ppg"] = home["points"] / home["games"]
+        row["home_papg"] = home.get("allowed", 0) / home["games"]
         row["home_rest_days"] = (game["date"] - home["date"]).days
         if injuries is not None:
             row["home_prior_injuries"] = prior_value(injuries, home["season"], home["week"], game["home"])
@@ -516,6 +532,7 @@ def features_for(
     if away and away["games"] > 0:
         row["away_win_rate"] = away["wins"] / away["games"]
         row["away_ppg"] = away["points"] / away["games"]
+        row["away_papg"] = away.get("allowed", 0) / away["games"]
         row["away_rest_days"] = (game["date"] - away["date"]).days
         if injuries is not None:
             row["away_prior_injuries"] = prior_value(injuries, away["season"], away["week"], game["away"])
@@ -558,6 +575,7 @@ def update_state(state: dict, game: dict) -> None:
                 "games": 0,
                 "wins": 0,
                 "points": 0,
+                "allowed": 0,
                 "date": game["date"],
                 "season": game["season"],
                 "week": game["week"],
@@ -565,8 +583,10 @@ def update_state(state: dict, game: dict) -> None:
             },
         )
         slot.setdefault("recent", [])
+        slot.setdefault("allowed", 0)
         slot["games"] += 1
         slot["points"] += scored
+        slot["allowed"] += allowed
         slot["recent"].append((1 if scored > allowed else 0, scored - allowed))
         if scored > allowed:
             slot["wins"] += 1
@@ -842,6 +862,46 @@ def score_points(row: dict, features: list[str], bundle) -> tuple[float | None, 
     return probability, float(home_points.predict(sample)[0]), float(away_points.predict(sample)[0])
 
 
+def fit_points_residual(rows: list[dict], features: list[str]):
+    """Fit the miss versus prior points per game. The target uses the score. The features do not."""
+    usable = [
+        row for row in rows
+        if row.get("home_ppg") is not None
+        and row.get("away_ppg") is not None
+        and row.get("home_score") is not None
+        and row.get("away_score") is not None
+    ]
+    if len(usable) < 2:
+        return None
+    frame = pd.DataFrame(usable)
+    matrix = frame[features].to_numpy(dtype=float)
+    center = matrix.mean(axis=0)
+    scale = matrix.std(axis=0)
+    scale[scale == 0] = 1.0
+    scaled = (matrix - center) / scale
+    home_model = LinearRegression().fit(
+        scaled,
+        frame["home_score"].to_numpy(dtype=float) - frame["home_ppg"].to_numpy(dtype=float),
+    )
+    away_model = LinearRegression().fit(
+        scaled,
+        frame["away_score"].to_numpy(dtype=float) - frame["away_ppg"].to_numpy(dtype=float),
+    )
+    return center, scale, home_model, away_model
+
+
+def apply_points_residual(row: dict, features: list[str], residual) -> tuple[float, float] | None:
+    if residual is None or row.get("home_ppg") is None or row.get("away_ppg") is None:
+        return None
+    if any(row.get(feature) is None for feature in features):
+        return None
+    center, scale, home_model, away_model = residual
+    sample = ((np.array([row[feature] for feature in features], dtype=float) - center) / scale).reshape(1, -1)
+    home = float(row["home_ppg"]) + float(home_model.predict(sample)[0])
+    away = float(row["away_ppg"]) + float(away_model.predict(sample)[0])
+    return home, away
+
+
 def holdout_metrics(rows: list[dict], features: list[str], required: list[str] | None = None) -> dict | None:
     """Fit only on earlier games. The test rows keep their own scores out of the features."""
     needed = features if required is None else required
@@ -850,9 +910,11 @@ def holdout_metrics(rows: list[dict], features: list[str], required: list[str] |
     if len(train_rows) < 2 or not test_rows or len({row["home_win"] for row in train_rows}) < 2:
         return None
     bundle = fit_bundle(train_rows, features)
+    residual = fit_points_residual(train_rows, features)
     correct = 0
     total_error = 0.0
     blend_error = 0.0
+    residual_error = 0.0
     pairs = []
     for row in test_rows:
         probability, home_points, away_points = score_points(row, features, bundle)
@@ -864,6 +926,9 @@ def holdout_metrics(rows: list[dict], features: list[str], required: list[str] |
         total_error += abs(regression_total - actual_total)
         prior_total = float(row["home_ppg"]) + float(row["away_ppg"])
         blend_error += abs((0.5 * regression_total + 0.5 * prior_total) - actual_total)
+        adjusted = apply_points_residual(row, features, residual)
+        if adjusted is not None:
+            residual_error += abs((adjusted[0] + adjusted[1]) - actual_total)
         pairs.append({"home_win": int(row["home_win"]), "home_win_prob": probability})
     counted = len(pairs)
     if counted == 0:
@@ -874,31 +939,65 @@ def holdout_metrics(rows: list[dict], features: list[str], required: list[str] |
         "accuracy": correct / counted,
         "total_mae": total_error / counted,
         "blend_mae": blend_error / counted,
+        "residual_mae": residual_error / counted,
         "pairs": pairs,
     }
 
 
+def metric_holds(candidate: dict | None, baseline: dict | None) -> bool:
+    if candidate is None or baseline is None:
+        return False
+    accuracy_holds = candidate["accuracy"] + 1e-12 >= baseline["accuracy"]
+    points_hold = candidate["total_mae"] <= baseline["total_mae"] + 0.5
+    return accuracy_holds and points_hold
+
+
+def choose_points_mode(block: dict | None) -> str:
+    """Use a second points model only when it lowers the holdout total error."""
+    if block is None:
+        return "regression"
+    options = [("regression", block["total_mae"]), ("blend", block["blend_mae"])]
+    residual = block.get("residual_mae")
+    if residual is not None:
+        options.append(("residual", residual))
+    name, value = min(options, key=lambda item: (item[1], item[0]))
+    if name != "regression" and value + 0.05 < block["total_mae"]:
+        return name
+    return "regression"
+
+
 def choose_features(completed_rows: list[dict], features: list[str]) -> tuple[list[str], dict]:
-    """Keep recent form only when the 2026 holdout does not get worse."""
-    recent_names = [name for name in RECENT_FEATURES if name not in features]
-    expanded = features + recent_names
-    baseline = holdout_metrics(completed_rows, features, expanded)
-    candidate = holdout_metrics(completed_rows, expanded, expanded)
-    report = {"baseline": baseline, "recent": candidate, "adopted_recent": False, "use_blend": False}
-    chosen = list(features)
+    """Keep points allowed, then recent form, only when the 2026 holdout does not get worse."""
+    defense_names = [name for name in DEFENSE_FEATURES if name not in features]
+    with_defense = features + defense_names
+    baseline = holdout_metrics(completed_rows, features, with_defense)
+    defense = holdout_metrics(completed_rows, with_defense, with_defense)
     base_count = len(ready_rows(completed_rows, features, None, None))
+    defense_count = len(ready_rows(completed_rows, with_defense, None, None))
+    adopted_defense = defense_count == base_count and metric_holds(defense, baseline)
+    chosen = with_defense if adopted_defense else list(features)
+
+    recent_names = [name for name in RECENT_FEATURES if name not in chosen]
+    expanded = chosen + recent_names
+    recent_base = holdout_metrics(completed_rows, chosen, expanded)
+    recent = holdout_metrics(completed_rows, expanded, expanded)
+    chosen_count = len(ready_rows(completed_rows, chosen, None, None))
     recent_count = len(ready_rows(completed_rows, expanded, None, None))
-    if baseline is not None and candidate is not None and recent_count == base_count:
-        accuracy_holds = candidate["accuracy"] + 1e-12 >= baseline["accuracy"]
-        points_hold = candidate["total_mae"] <= baseline["total_mae"] + 0.5
-        if accuracy_holds and points_hold:
-            chosen = expanded
-            report["adopted_recent"] = True
-    active = candidate if report["adopted_recent"] else baseline
-    if active is not None and active["blend_mae"] + 0.05 < active["total_mae"]:
-        report["use_blend"] = True
-    report["chosen"] = active
-    return chosen, report
+    adopted_recent = recent_count == chosen_count and metric_holds(recent, recent_base)
+    if adopted_recent:
+        chosen = expanded
+    active = recent if adopted_recent else recent_base
+    points_mode = choose_points_mode(active)
+    return chosen, {
+        "baseline": baseline,
+        "defense": defense,
+        "recent": recent,
+        "adopted_defense": adopted_defense,
+        "adopted_recent": adopted_recent,
+        "points_mode": points_mode,
+        "use_blend": points_mode == "blend",
+        "chosen": active,
+    }
 
 
 def win_probability(row: dict, features: list[str], center, scale, ridge, positive_is_home: bool) -> float | None:
@@ -919,7 +1018,7 @@ def train(
     completed_rows: list[dict],
     next_rows: list[dict],
     features: list[str],
-    use_blend: bool = False,
+    points_mode: str = "regression",
 ) -> tuple[int, list[dict]]:
     for row in completed_rows:
         row["home_win_prob"] = None
@@ -937,6 +1036,7 @@ def train(
             clear_prediction(row)
         return len(trainable), next_rows
     bundle = fit_bundle(trainable, features)
+    residual_models = fit_points_residual(trainable, features) if points_mode == "residual" else None
     unscored = 0
     for row in completed_rows:
         probability = win_probability(row, features, bundle[0], bundle[1], bundle[2], bundle[5])
@@ -948,12 +1048,18 @@ def train(
         if probability is None or home is None or away is None:
             clear_prediction(row)
             continue
-        if use_blend and row.get("home_ppg") is not None and row.get("away_ppg") is not None:
+        if points_mode == "blend" and row.get("home_ppg") is not None and row.get("away_ppg") is not None:
             regression_total = home + away
             blended_total = 0.5 * regression_total + 0.5 * (float(row["home_ppg"]) + float(row["away_ppg"]))
             margin = home - away
             home = (blended_total + margin) / 2
             away = (blended_total - margin) / 2
+        elif points_mode == "residual":
+            adjusted = apply_points_residual(row, features, residual_models)
+            if adjusted is None:
+                clear_prediction(row)
+                continue
+            home, away = adjusted
         row["home_win_prob"] = probability
         row["predicted_home_points"] = home
         row["predicted_away_points"] = away
@@ -1036,6 +1142,7 @@ def model_card_line(label: str, block: dict | None) -> str:
     return (
         f"{label}: accuracy {block['accuracy']:.4f}, total MAE {block['total_mae']:.3f}, "
         f"prior-points blend MAE {block['blend_mae']:.3f}, "
+        f"residual MAE {block.get('residual_mae', 0):.3f}, "
         f"{block['test_rows']} test games after {block['train_rows']} earlier games, "
         f"from {HOLDOUT_START.isoformat()}"
     )
@@ -1044,6 +1151,7 @@ def model_card_line(label: str, block: dict | None) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     local = "--local" in args
+    log_line("refresh start " + ("local" if local else "download"))
     saved: list[str] = []
     skipped: list[str] = ["participation was not requested and was not downloaded"]
     if local:
@@ -1188,7 +1296,7 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
             next_rows.append({**game, **feature_row})
 
     features, model_report = choose_features(completed_rows, features)
-    train_rows, next_rows = train(completed_rows, next_rows, features, model_report["use_blend"])
+    train_rows, next_rows = train(completed_rows, next_rows, features, model_report["points_mode"])
     unscored = sum(1 for row in completed_rows if row.get("home_win_prob") is None)
     scored = [
         row for row in completed_rows
@@ -1258,7 +1366,7 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
             "",
             "nflverse is the recorded-stats source. ESPN is a live score check and is not copied into the training scores. Sleeper supplies the current week only. nfl.com is not requested. Real is not a source.",
             "",
-            "The training rows use only earlier games: win rate, points per game, rest days, the last four games' win rate and margin when that check improves the 2026 holdout, prior-week injury and snap counts, and the starting quarterback's prior-games passer rating and interception rate. A game does not train on its own score or its own quarterback line. The win model is a ridge classifier. Points use linear regression, plus a half-weight of prior points per game only when that blend lowers the holdout total error.",
+            "The training rows use only earlier games: win rate, points per game, points allowed, rest days, the last four games' win rate and margin when that check improves the 2026 holdout, prior-week injury and snap counts, and the starting quarterback's prior-games passer rating and interception rate. Opponent win rate is the other side's prior win rate. A game does not train on its own score or its own quarterback line. The win model is a ridge classifier. Points use linear regression. A half-weight of prior points per game, or a residual on top of prior points per game, is used only when that choice lowers the holdout total error.",
             "",
             "The line is the recorded schedule line, not a live book price, and this does not price a bet. A lean is not a wager.",
             "",
@@ -1279,9 +1387,12 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
             f"High-confidence next games: {sum(row.get('confidence_tier') == 'high' for row in next_rows)}",
             f"In-sample accuracy: {'not computed' if in_sample_accuracy is None else f'{in_sample_accuracy:.4f}'} on {len(scored)} scored rows",
             model_card_line("Baseline holdout", model_report.get("baseline")),
+            model_card_line("Points-allowed holdout", model_report.get("defense")),
             model_card_line("Recent-form holdout", model_report.get("recent")),
+            f"Points allowed adopted: {'yes' if model_report['adopted_defense'] else 'no'}",
             f"Recent form adopted: {'yes' if model_report['adopted_recent'] else 'no'}",
             f"Points blend adopted: {'yes' if model_report['use_blend'] else 'no'}",
+            f"Points method: {model_report['points_mode']}",
             f"Date check: {'pass' if date_ok else 'fail'}",
             "",
             "Files saved:",
@@ -1304,8 +1415,10 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
     print("next_rows", len(next_rows), flush=True)
     print("date_check", "pass" if date_ok else "fail", flush=True)
     print("features", ",".join(features), flush=True)
+    print("points_allowed", "yes" if model_report["adopted_defense"] else "no", flush=True)
     print("recent_form", "yes" if model_report["adopted_recent"] else "no", flush=True)
     print("points_blend", "yes" if model_report["use_blend"] else "no", flush=True)
+    print("points_method", model_report["points_mode"], flush=True)
     if in_sample_accuracy is not None:
         print("in_sample_accuracy", f"{in_sample_accuracy:.4f}", flush=True)
     chosen = model_report.get("chosen")
@@ -1314,7 +1427,8 @@ def build_model(games, sleeper, saved, skipped, espn_status, nfl_status) -> int:
         print("holdout_total_mae", f"{chosen['total_mae']:.3f}", flush=True)
     log_line(
         f"rows {len(completed_rows)} train {train_rows} next {len(next_rows)} "
-        f"max {max_date.isoformat()} recent {model_report['adopted_recent']} blend {model_report['use_blend']}"
+        f"max {max_date.isoformat()} defense {model_report['adopted_defense']} "
+        f"recent {model_report['adopted_recent']} points {model_report['points_mode']}"
     )
     valid = run_validation()
     print("validation", "pass" if valid == 0 else "fail", flush=True)

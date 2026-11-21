@@ -2,7 +2,7 @@ Run python scripts/refresh_week.py once a week during the season. It does not ru
 
 nflverse is the recorded-stats source. ESPN is a live score check and is not copied into the training scores. Sleeper supplies the current week only. nfl.com is not requested. Real is not a source.
 
-The training rows use only earlier games: win rate, points per game, rest days, the last four games' win rate and margin when that check improves the 2026 holdout, prior-week injury and snap counts, and the starting quarterback's prior-games passer rating and interception rate. A game does not train on its own score or its own quarterback line. The win model is a ridge classifier. Points use linear regression, plus a half-weight of prior points per game only when that blend lowers the holdout total error.
+The training rows use only earlier games: win rate, points per game, points allowed, rest days, the last four games' win rate and margin when that check improves the 2026 holdout, prior-week injury and snap counts, and the starting quarterback's prior-games passer rating and interception rate. Opponent win rate is the other side's prior win rate. A game does not train on its own score or its own quarterback line. The win model is a ridge classifier. Points use linear regression. A half-weight of prior points per game, or a residual on top of prior points per game, is used only when that choice lowers the holdout total error.
 
 The line is the recorded schedule line, not a live book price, and this does not price a bet. A lean is not a wager.
 
@@ -10,25 +10,52 @@ Week 4 Green Bay at Tampa Bay, game 2026_04_GB_TB, lists Jordan Love (00-0036264
 
 Calibration is a check, not a bet.
 
-Rows that could not be scored: 25
+Rows that could not be scored: 26
 
 spread_line, total_line, home_moneyline, and div_game are model features when the schedule file has those columns. roof, surface, temp, wind, away_qb_id, and home_qb_id are carried from that file. temp and wind are blank on the current week, so they are not filled and are not model features.
 
-Completed rows: 422
-Training rows: 395
+Completed rows: 436
+Training rows: 408
 Feature count: 18
 Minimum date: 2025-09-04
-Maximum date: 2026-11-12
-Next games: 13
-High-confidence next games: 4
-In-sample accuracy: 0.6684 on 395 scored rows
-Baseline holdout: accuracy 0.6269, total MAE 14.513, prior-points blend MAE 12.540, 134 test games after 261 earlier games, from 2026-09-01
-Recent-form holdout: accuracy 0.5746, total MAE 14.010, prior-points blend MAE 12.329, 134 test games after 261 earlier games, from 2026-09-01
+Maximum date: 2026-11-19
+Next games: 12
+High-confidence next games: 7
+In-sample accuracy: 0.6789 on 408 scored rows
+Baseline holdout: accuracy 0.6463, total MAE 14.045, prior-points blend MAE 12.261, residual MAE 14.045, 147 test games after 261 earlier games, from 2026-09-01
+Points-allowed holdout: accuracy 0.6190, total MAE 13.629, prior-points blend MAE 12.072, residual MAE 13.629, 147 test games after 261 earlier games, from 2026-09-01
+Recent-form holdout: accuracy 0.5850, total MAE 13.577, prior-points blend MAE 12.048, residual MAE 13.577, 147 test games after 261 earlier games, from 2026-09-01
+Points allowed adopted: no
 Recent form adopted: no
 Points blend adopted: yes
+Points method: blend
 Date check: pass
 
 Files saved:
+- data/schedules/games.csv
+- data/stats_player/stats_player_post_2025.csv
+- data/stats_player/stats_player_regpost_2025.csv
+- data/stats_player/stats_player_regpost_2026.csv
+- data/stats_player/stats_player_reg_2025.csv
+- data/stats_player/stats_player_reg_2026.csv
+- data/stats_player/stats_player_week_2025.csv
+- data/stats_player/stats_player_week_2026.csv
+- data/stats_team/stats_team_post_2025.csv
+- data/stats_team/stats_team_regpost_2025.csv
+- data/stats_team/stats_team_regpost_2026.csv
+- data/stats_team/stats_team_reg_2025.csv
+- data/stats_team/stats_team_reg_2026.csv
+- data/stats_team/stats_team_week_2025.csv
+- data/stats_team/stats_team_week_2026.csv
+- data/injuries/injuries_2025.csv
+- data/injuries/injuries_2026.csv
+- data/depth_charts/depth_charts_2025.csv
+- data/depth_charts/depth_charts_2026.csv
+- data/snap_counts/snap_counts_2025.csv
+- data/snap_counts/snap_counts_2026.csv
+- data/nextgen_stats/ngs_passing.csv.gz
+- data/nextgen_stats/ngs_receiving.csv.gz
+- data/nextgen_stats/ngs_rushing.csv.gz
 - data/live/espn_scoreboard.json
 - data/live/sleeper_state.json
 - artifacts/nfl_completed.csv
@@ -39,7 +66,6 @@ Files saved:
 
 Files skipped:
 - participation was not requested and was not downloaded
-- local rebuild did not download
 - nfl.com was not requested
 
 ESPN status: 200
@@ -47,4 +73,4 @@ nfl.com status: not requested
 
 FanGraphs, stats.nba.com, nba_api, and football-data.org were not called. Raw XY tracking was not downloaded.
 
-Roster sheets were rebuilt by scripts/build_roster.py from the week files already on disk. The 2026 sheet has 1,790 rows, weeks 1 through 10, all 32 teams, and the required positions. The mixed 2025-2026 sheet has 2,860 rows. The depth-chart stamp is 2026-11-14T14:04:32Z. A starter is the first charted player at that position who is not Out on the team's latest injury week. Jordan Love is Green Bay. Baker Mayfield is the Tampa Bay starter. Jayden Daniels is Washington. Jalon Daniels is Tampa Bay and is not the starter. Snaps that do not match the display name and team stay blank. The sheets do not price a bet.
+Roster sheets were rebuilt by scripts/build_roster.py from the week files already on disk. The 2026 sheet has 1,831 rows, all 32 teams, and the required positions. The mixed 2025-2026 sheet has 2,894 rows. The depth-chart stamp is 2026-11-20T16:05:07Z. A starter is the first charted player at that position who is not Out on the team's latest injury week. Jordan Love is Green Bay and is the starter. Baker Mayfield is the Tampa Bay starter. Jayden Daniels is Washington and is the starter. Jalon Daniels is Tampa Bay and is not the starter. Snaps that do not match the display name and team stay blank. The sheets do not price a bet.
