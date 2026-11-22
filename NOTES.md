@@ -32,30 +32,6 @@ Points method: blend
 Date check: pass
 
 Files saved:
-- data/schedules/games.csv
-- data/stats_player/stats_player_post_2025.csv
-- data/stats_player/stats_player_regpost_2025.csv
-- data/stats_player/stats_player_regpost_2026.csv
-- data/stats_player/stats_player_reg_2025.csv
-- data/stats_player/stats_player_reg_2026.csv
-- data/stats_player/stats_player_week_2025.csv
-- data/stats_player/stats_player_week_2026.csv
-- data/stats_team/stats_team_post_2025.csv
-- data/stats_team/stats_team_regpost_2025.csv
-- data/stats_team/stats_team_regpost_2026.csv
-- data/stats_team/stats_team_reg_2025.csv
-- data/stats_team/stats_team_reg_2026.csv
-- data/stats_team/stats_team_week_2025.csv
-- data/stats_team/stats_team_week_2026.csv
-- data/injuries/injuries_2025.csv
-- data/injuries/injuries_2026.csv
-- data/depth_charts/depth_charts_2025.csv
-- data/depth_charts/depth_charts_2026.csv
-- data/snap_counts/snap_counts_2025.csv
-- data/snap_counts/snap_counts_2026.csv
-- data/nextgen_stats/ngs_passing.csv.gz
-- data/nextgen_stats/ngs_receiving.csv.gz
-- data/nextgen_stats/ngs_rushing.csv.gz
 - data/live/espn_scoreboard.json
 - data/live/sleeper_state.json
 - artifacts/nfl_completed.csv
@@ -66,6 +42,7 @@ Files saved:
 
 Files skipped:
 - participation was not requested and was not downloaded
+- local rebuild did not download
 - nfl.com was not requested
 
 ESPN status: 200
@@ -73,4 +50,6 @@ nfl.com status: not requested
 
 FanGraphs, stats.nba.com, nba_api, and football-data.org were not called. Raw XY tracking was not downloaded.
 
-Roster sheets were rebuilt by scripts/build_roster.py from the week files already on disk. The 2026 sheet has 1,831 rows, all 32 teams, and the required positions. The mixed 2025-2026 sheet has 2,894 rows. The depth-chart stamp is 2026-11-20T16:05:07Z. A starter is the first charted player at that position who is not Out on the team's latest injury week. Jordan Love is Green Bay and is the starter. Baker Mayfield is the Tampa Bay starter. Jayden Daniels is Washington and is the starter. Jalon Daniels is Tampa Bay and is not the starter. Snaps that do not match the display name and team stay blank. The sheets do not price a bet.
+Checked on 2026-11-22. The nflverse schedule still has one scored week-11 game, 2026-11-19 Indianapolis 3 at Houston 26. The other 12 week-11 games have no score in games.csv. ESPN returned 200 and showed that Thursday game final, seven Sunday games in progress, and five games not started. Live ESPN scores were not copied. Sleeper was week 11, regular season 2026. That download updated the injury file to 3,481 rows across weeks 1 through 11, the depth chart stamped 2026-11-22T15:12:52Z, Next Gen Stats, and the recorded week-11 schedule lines. Arizona at Kansas City lists Josh Johnson (00-0026300). Week 12 spread, total, and moneyline cells are blank in that schedule file and were not filled. The model was then rebuilt from these local files. The feature count stayed 18. Points allowed stayed out. Recent form stayed out. The points method stayed blend. The last final remains 2026-11-19.
+
+Roster sheets were rebuilt by scripts/build_roster.py from the week files already on disk. The 2026 sheet has 1,831 rows, all 32 teams, and the required positions. The mixed 2025-2026 sheet has 2,894 rows. The depth-chart stamp is 2026-11-22T15:12:52Z. A starter is the first charted player at that position who is not Out on the team's latest injury week. Jordan Love is Green Bay and is the starter. Baker Mayfield is the Tampa Bay starter and is Questionable. Jayden Daniels is Washington and is the starter. Jalon Daniels is Tampa Bay and is not the starter. Snaps that do not match the display name and team stay blank. The sheets do not price a bet.
